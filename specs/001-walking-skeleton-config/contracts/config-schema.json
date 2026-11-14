@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DermaConfigSchema",
+  "description": "Validation schema for root derma_config.yaml",
+  "type": "object",
+  "required": ["dataset", "preprocessing", "biomarkers", "mamdani_fis"],
+  "properties": {
+    "dataset": {
+      "type": "object",
+      "required": ["name", "image_size", "target_classes", "samples_per_class", "random_state", "split_ratios"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "image_size": {
+          "type": "array",
+          "prefixItems": [{ "type": "integer", "minimum": 32 }, { "type": "integer", "minimum": 32 }],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "target_classes": {
+          "type": "object",
+          "minProperties": 2,
+          "additionalProperties": { "type": "string" }
+        },
+        "samples_per_class": { "type": "integer", "minimum": 1 },
+        "random_state": { "type": "integer" },
+        "split_ratios": {
+          "type": "object",
+          "required": ["train", "val", "test"],
+          "properties": {
+            "train": { "type": "number", "exclusiveMinimum": 0.0, "exclusiveMaximum": 1.0 },
+            "val": { "type": "number", "exclusiveMinimum": 0.0, "exclusiveMaximum": 1.0 },
+            "test": { "type": "number", "exclusiveMinimum": 0.0, "exclusiveMaximum": 1.0 }
+          }
+        }
+      }
+    },
+    "preprocessing": {
+      "type": "object",
+      "required": [
+        "blackhat_kernel_size",
+        "inpaint_radius",
+        "clahe_clip_limit",
+        "clahe_tile_grid",
+        "gaussian_blur_kernel",
+        "boundary_ring_kernel",
+        "mask_area_bounds",
+        "eps"
+      ],
+      "properties": {
+        "blackhat_kernel_size": { "type": "integer", "minimum": 1 },
+        "inpaint_radius": { "type": "integer", "minimum": 1 },
+        "clahe_clip_limit": { "type": "number", "exclusiveMinimum": 0.0 },
+        "clahe_tile_grid": {
+          "type": "array",
+          "prefixItems": [{ "type": "integer", "minimum": 1 }, { "type": "integer", "minimum": 1 }],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "gaussian_blur_kernel": { "type": "integer", "minimum": 1 },
+        "boundary_ring_kernel": { "type": "integer", "minimum": 1 },
+        "mask_area_bounds": {
+          "type": "array",
+          "prefixItems": [{ "type": "number", "exclusiveMinimum": 0.0 }, { "type": "number", "exclusiveMaximum": 1.0 }],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "eps": { "type": "number", "exclusiveMinimum": 0.0 }
+      }
+    },
+    "biomarkers": {
+      "type": "object",
+      "required": ["b_fuzzy_weights", "feature_names", "value_range"],
+      "properties": {
+        "b_fuzzy_weights": {
+          "type": "object",
+          "required": ["w_geo", "w_grad"],
+          "properties": {
+            "w_geo": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "w_grad": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+          }
+        },
+        "feature_names": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "value_range": {
+          "type": "array",
+          "prefixItems": [{ "const": 0.0 }, { "const": 1.0 }],
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "mamdani_fis": {
+      "type": "object",
+      "required": ["percentiles", "defuzzification_method", "risk_thresholds"],
+      "properties": {
+        "percentiles": {
+          "type": "array",
+          "items": { "type": "number", "exclusiveMinimum": 0.0, "exclusiveMaximum": 100.0 },
+          "minItems": 2
+        },
+        "defuzzification_method": {
+          "type": "string",
+          "enum": ["centroid", "bisector", "mom"]
+        },
+        "risk_thresholds": {
+          "type": "object",
+          "required": ["low_max", "medium_max"],
+          "properties": {
+            "low_max": { "type": "number", "minimum": 0.0 },
+            "medium_max": { "type": "number", "minimum": 0.0 }
+          }
+        }
+      }
+    }
+  }
+}

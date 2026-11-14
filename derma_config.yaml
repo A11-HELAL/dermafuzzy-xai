@@ -1,0 +1,46 @@
+# ==============================================================================
+# DermaFuzzy-XAI Unified Configuration File
+# Single source of truth for all pipeline hyperparameters, kernels, and thresholds.
+# Governed by the DermaFuzzy-XAI Constitution (Zero Magic Numbers Policy).
+# ==============================================================================
+
+dataset:
+  name: "HAM10000"
+  image_size: [224, 224]
+  target_classes:
+    malignant: "mel"
+    benign: "nv"
+  samples_per_class: 1000
+  random_state: 42
+  split_ratios:
+    train: 0.70
+    val: 0.15
+    test: 0.15
+
+preprocessing:
+  blackhat_kernel_size: 17
+  inpaint_radius: 3
+  clahe_clip_limit: 2.0
+  clahe_tile_grid: [8, 8]
+  gaussian_blur_kernel: 5
+  boundary_ring_kernel: 5
+  mask_area_bounds: [0.02, 0.90]
+  eps: 1.0e-6
+
+biomarkers:
+  b_fuzzy_weights:
+    w_geo: 0.5
+    w_grad: 0.5
+  feature_names:
+    - "A"
+    - "B_fuzzy"
+    - "C"
+    - "D_verified"
+  value_range: [0.0, 1.0]
+
+mamdani_fis:
+  percentiles: [25, 50, 75]
+  defuzzification_method: "centroid"
+  risk_thresholds:
+    low_max: 35.0
+    medium_max: 65.0
