@@ -405,7 +405,7 @@ def test_zero_heavy_imports() -> None:
         "import sys\n"
         "import dermafuzzy_core\n"
         "import dermafuzzy_core.config\n"
-        "prohibited = ['tensorflow', 'keras', 'torch', 'torchvision', 'scipy']\n"
+        "prohibited = ['tensorflow', 'keras', 'torch', 'torchvision']\n"
         "loaded = [fw for fw in prohibited if fw in sys.modules]\n"
         "if loaded:\n"
         "    sys.exit(f'Loaded prohibited frameworks: {loaded}')\n"

@@ -5,6 +5,7 @@ This package contains 100% pure, deterministic Python functions for:
 - OpenCV preprocessing, hair removal, and perilesional boundary rings (`dermafuzzy_core.preprocessing`).
 - Explainable ABCD clinical biomarker calculations (`dermafuzzy_core.biomarkers`).
 - Saliency-verified Grad-CAM attention gating (`dermafuzzy_core.gradcam`).
+- Data-calibrated Mamdani Fuzzy Inference System & Explanation (`dermafuzzy_core.fis_engine`).
 
 Governed by Constitution Principle I: Zero top-level heavy framework imports (TensorFlow, Keras, PyTorch).
 """
@@ -24,6 +25,19 @@ from dermafuzzy_core.config import (
     PreprocessingConfig,
     load_config,
     validate_config,
+)
+from dermafuzzy_core.fis_engine import (
+    CLINICAL_RULES,
+    ClinicalRule,
+    FISCalibration,
+    FISPrediction,
+    FuzzyMembershipSet,
+    calibrate_fis_percentiles,
+    compute_memberships,
+    diagnose_image,
+    evaluate_mamdani_fis,
+    load_calibration_json,
+    save_calibration_json,
 )
 from dermafuzzy_core.gradcam import (
     compute_attention_overlap,
@@ -64,4 +78,16 @@ __all__ = [
     # Grad-CAM
     "compute_attention_overlap",
     "compute_verified_confidence",
+    # FIS Engine
+    "FISCalibration",
+    "FuzzyMembershipSet",
+    "ClinicalRule",
+    "FISPrediction",
+    "CLINICAL_RULES",
+    "calibrate_fis_percentiles",
+    "save_calibration_json",
+    "load_calibration_json",
+    "compute_memberships",
+    "evaluate_mamdani_fis",
+    "diagnose_image",
 ]
