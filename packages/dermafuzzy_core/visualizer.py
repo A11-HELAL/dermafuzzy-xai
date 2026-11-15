@@ -214,7 +214,7 @@ def render_four_panel_report(
     fis_prediction: FISPrediction,
     heatmap: np.ndarray,
     output_path: str | Path | None = None,
-    dpi: int = 300,
+    dpi: int = DEFAULT_DPI,
     config: FourPanelReportConfig | None = None,
 ) -> np.ndarray:
     """Render standardized 4-panel clinical XAI audit figure.

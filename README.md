@@ -4,7 +4,7 @@
 [![Python 3.12 | 3.14](https://img.shields.io/badge/Python-3.12%20%7C%203.14-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Constitution Principle I](https://img.shields.io/badge/Pure%20Core-Zero%20ML%20Skew-brightgreen.svg)](#engineering-constitution--guarantees)
-[![Tests Passing](https://img.shields.io/badge/Tests-156%20Passing-success.svg)](tests/)
+[![Tests Passing](https://img.shields.io/badge/Tests-210%20Passing-success.svg)](tests/)
 
 **Explainable Melanoma Diagnosis via Fuzzy Border Uncertainty and Attention-Verified Deep Biomarkers.**
 
@@ -152,7 +152,7 @@ pip install pytest
 
 ### Run Full Test Suite
 ```bash
-# Execute all 156 unit and metamorphic tests
+# Execute all 210 unit and metamorphic tests
 pytest -v tests/
 ```
 
@@ -164,12 +164,13 @@ from dermafuzzy_core import load_calibration_json, diagnose_image, render_four_p
 # 1. Load data-calibrated percentiles (zero pickle)
 calibration = load_calibration_json("artifacts/fis_calibration.json")
 
-# 2. Diagnose dermoscopic image with unverified CNN confidence & Grad-CAM heatmap
-image = cv2.imread("sample_lesion.jpg")
+# 2. Diagnose dermoscopic image (RGB format) with unverified CNN confidence & Grad-CAM heatmap
+bgr_image = cv2.imread("sample_lesion.jpg")
+image_rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
 p_cnn = 0.88
 gradcam_heatmap = ... # 2D float32 array in [0.0, 1.0]
 
-prep_res, bio_res, fis_pred = diagnose_image(image, p_cnn, gradcam_heatmap, calibration)
+prep_res, bio_res, fis_pred = diagnose_image(image_rgb, p_cnn, gradcam_heatmap, calibration)
 
 print(f"Risk Score: {fis_pred.risk_score:.1f}%")
 print(f"Clinical Category: {fis_pred.risk_category}")
@@ -184,9 +185,24 @@ report_rgb = render_four_panel_report(
 
 ---
 
-## Standalone Colab HAM10000 Pipeline
+## Public API Reference (`packages/dermafuzzy_core`)
 
-The training and evaluation service is implemented in `services/colab_trainer/train_ham10000.py`:
+All core mathematical, segmentation, fuzzy inference, evaluation, and visualization symbols are directly exported from `dermafuzzy_core`:
+
+| Architectural Room | Exported Public Symbols | Purpose & Contracts |
+|---|---|---|
+| **Package Meta** | `__version__` | Core library semver string (`0.1.0`). |
+| **Room 1: Config** | `DermaConfig`, `DatasetConfig`, `PreprocessingConfig`, `BiomarkersConfig`, `MamdaniFISConfig`, `load_config`, `validate_config` | Slotted immutable domain dataclasses with `MappingProxyType` deep immutability and YAML loader. |
+| **Room 2: Preprocessing** | `PreprocessingResult`, `preprocess_image`, `remove_hair`, `apply_lab_clahe`, `extract_lesion_mask_and_ring` | OpenCV DullRazor inpainting, CIE-LAB L CLAHE, and boundary ring extraction (`arr.flags.writeable = False`). |
+| **Room 3: ABCD Biomarkers & Grad-CAM** | `BiomarkerResult`, `compute_asymmetry`, `compute_border_fuzziness`, `compute_color_variation`, `extract_abcd_biomarkers`, `compute_attention_overlap`, `compute_verified_confidence` | Normalized clinical biomarkers in $[0.0, 1.0]$ and saliency-verified deep confidence gating ($D_{verified} = p_{cnn} \cdot \alpha$). |
+| **Room 4: Mamdani FIS Engine** | `FISCalibration`, `FuzzyMembershipSet`, `ClinicalRule`, `FISPrediction`, `CLINICAL_RULES`, `calibrate_fis_percentiles`, `save_calibration_json`, `load_calibration_json`, `compute_memberships`, `evaluate_mamdani_fis`, `diagnose_image` | Data-driven quartile calibration (JSON-persisted), Partition-of-Unity membership evaluation, 5-rule inference, and end-to-end diagnosis. |
+| **Room 5: Evaluation & Visualizer** | `ClinicalMetrics`, `AblationReport`, `compute_clinical_metrics`, `evaluate_crisp_abcd_baseline`, `run_ablation_study`, `FourPanelReportConfig`, `render_four_panel_report` | Pure NumPy biostatistical metrics, tied-score trapezoidal AUC-ROC, 3-tier comparative ablation study, and 300 DPI headless visualizer. |
+
+---
+
+## Standalone Colab HAM10000 Training & Evaluation Pipeline
+
+The training and evaluation pipeline is implemented in `services/colab_trainer/train_ham10000.py`:
 
 ```bash
 # Execute fast local dry-run on synthetic phantoms (< 5 seconds, zero GPU needed)
@@ -194,11 +210,23 @@ python services/colab_trainer/train_ham10000.py --dry-run-synthetic
 
 # Execute full transfer learning on balanced HAM10000 (Melanoma vs Nevi) on Google Colab GPU
 python services/colab_trainer/train_ham10000.py \
-  --data-dir /content/HAM10000_images \
-  --metadata-csv /content/HAM10000_metadata.csv \
+  --data-dir data/HAM10000_images \
+  --metadata-csv data/HAM10000_metadata.csv \
   --output-dir artifacts \
-  --epochs 10
+  --epochs 10 \
+  --batch-size 32
 ```
+
+### CLI Arguments Reference
+
+| CLI Flag | Type | Default | Description |
+|---|:---:|:---:|---|
+| `--dry-run-synthetic` | flag | `False` | Execute deterministic 5-stage dry-run locally using synthetic phantoms (zero external dataset downloads or GPU required). |
+| `--data-dir` | `str` | `"data/HAM10000_images"` | Filesystem directory containing HAM10000 raw dermatoscopic `.jpg` images. |
+| `--metadata-csv` | `str` | `"data/HAM10000_metadata.csv"` | Filesystem path to HAM10000 ground truth metadata CSV. |
+| `--output-dir` | `str` | `"artifacts"` | Filesystem path where calibration JSON, ablation reports, and sample figures are exported. |
+| `--epochs` | `int` | `10` | Number of training epochs for MobileNetV2 transfer learning. |
+| `--batch-size` | `int` | `32` | Training mini-batch size. |
 
 ---
 
@@ -217,4 +245,4 @@ DermaFuzzy-XAI adheres strictly to four core engineering principles:
    - Calibrations and metrics are serialized strictly as human-readable JSON, Markdown, and CSV. Zero `.pkl` or `.pickle` files exist in this repository.
 4. **Principle IV: Config-Driven & Test-First**:
    - Zero hardcoded magic numbers; all hyperparameters governed by `derma_config.yaml`.
-   - Comprehensive test suite covering 156 unit and metamorphic tests with 100% pass rate.
+   - Comprehensive test suite covering 210 unit and metamorphic tests with 100% pass rate.

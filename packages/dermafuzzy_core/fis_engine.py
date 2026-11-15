@@ -305,8 +305,8 @@ def _validate_train_matrix(train_matrix: Any) -> np.ndarray:
 
     if arr.ndim != 2:
         raise ValueError(f"train_matrix must be a 2D array, got shape {arr.shape}")
-    if arr.shape[0] < 4:
-        raise ValueError(f"train_matrix must have at least 4 rows, got {arr.shape[0]}")
+    if arr.shape[0] < MIN_CALIBRATION_SAMPLES:
+        raise ValueError(f"train_matrix must have at least {MIN_CALIBRATION_SAMPLES} rows, got {arr.shape[0]}")
     if arr.shape[1] != 4:
         raise ValueError(f"train_matrix must have exactly 4 columns for ABCD, got {arr.shape[1]}")
 
@@ -331,6 +331,10 @@ def calibrate_fis_percentiles(
 
     Returns:
         FISCalibration instance with strictly monotonic, guarded cutoffs.
+
+    Raises:
+        ValueError: If train_matrix is not 2D, N < 4, contains non-finite values,
+                    or values outside [0.0, 1.0].
     """
     arr = _validate_train_matrix(train_matrix)
     cfg = config if config is not None else load_config()
@@ -339,7 +343,7 @@ def calibrate_fis_percentiles(
     if percentiles != [25, 50, 75]:
         percentiles = [25, 50, 75]
 
-    delta = 1e-4
+    delta = DEGENERATE_SEPARATION_DELTA
     cutoffs: dict[str, tuple[float, float, float]] = {}
 
     for j, feat in enumerate(CANONICAL_FEATURE_NAMES):
@@ -619,6 +623,9 @@ def diagnose_image(
 
     Returns:
         Tuple of (PreprocessingResult, BiomarkerResult, FISPrediction).
+
+    Raises:
+        ValueError: If input image, p_cnn, heatmap, or calibration are invalid.
     """
     from dermafuzzy_core.biomarkers import extract_abcd_biomarkers
     from dermafuzzy_core.preprocessing import preprocess_image

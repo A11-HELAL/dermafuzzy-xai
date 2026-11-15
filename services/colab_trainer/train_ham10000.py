@@ -55,7 +55,15 @@ from dermafuzzy_core.visualizer import FourPanelReportConfig, render_four_panel_
 
 
 def run_synthetic_dry_run(output_dir: Path, config: DermaConfig) -> None:
-    """Execute complete 5-stage pipeline locally using calibrated synthetic phantoms."""
+    """Execute complete 5-stage pipeline locally using calibrated synthetic phantoms.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Directory where artifacts (calibration JSON, reports, sample figures) are persisted.
+    config : DermaConfig
+        Validated configuration instance.
+    """
     print("=" * 70)
     print("DERMAFUZZY-XAI HAM10000 PIPELINE (DRY-RUN SYNTHETIC MODE)")
     print("=" * 70)
@@ -217,7 +225,13 @@ def run_synthetic_dry_run(output_dir: Path, config: DermaConfig) -> None:
 
 
 def run_full_colab_pipeline(args: argparse.Namespace) -> None:
-    """Execute full GPU MobileNetV2 fine-tuning on HAM10000 dataset in Google Colab."""
+    """Execute full GPU MobileNetV2 fine-tuning on HAM10000 dataset in Google Colab.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        CLI arguments specifying dataset paths, output directory, and training hyperparameters.
+    """
     print("Starting full Google Colab HAM10000 training pipeline...")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

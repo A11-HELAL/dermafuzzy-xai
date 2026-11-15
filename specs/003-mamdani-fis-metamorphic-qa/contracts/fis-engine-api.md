@@ -107,7 +107,7 @@ def compute_memberships(
 ### 2.4 `evaluate_mamdani_fis`
 ```python
 def evaluate_mamdani_fis(
-    biomarkers: BiomarkerResult | tuple[float, float, float, float],
+    biomarkers: BiomarkerResult | tuple[float, float, float, float] | Sequence[float],
     calibration: FISCalibration,
     config: DermaConfig | None = None,
 ) -> FISPrediction:
