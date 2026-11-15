@@ -12,3 +12,4 @@ build/
 Thumbs.db
 *.pkl
 *.pickle
+LIVE_STATE_SNAPSHOT.md

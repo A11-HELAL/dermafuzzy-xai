@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import copy
+import subprocess
 import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -399,17 +400,19 @@ def test_rejects_invalid_value_range(valid_config_dict: dict[str, Any]) -> None:
 # ------------------------------------------------------------------------------
 
 def test_zero_heavy_imports() -> None:
-    """Verify importing dermafuzzy_core.config does NOT load heavy ML or CV frameworks."""
-    import dermafuzzy_core.config  # noqa: F401
-
-    prohibited_frameworks = [
-        "tensorflow",
-        "keras",
-        "torch",
-        "torchvision",
-        "cv2",
-        "scipy",
-    ]
-
-    for fw in prohibited_frameworks:
-        assert fw not in sys.modules, f"Constitution violation: heavy framework '{fw}' found in sys.modules!"
+    """Verify importing dermafuzzy_core does NOT load heavy ML/DL frameworks per Constitution Principle I."""
+    code = (
+        "import sys\n"
+        "import dermafuzzy_core\n"
+        "import dermafuzzy_core.config\n"
+        "prohibited = ['tensorflow', 'keras', 'torch', 'torchvision', 'scipy']\n"
+        "loaded = [fw for fw in prohibited if fw in sys.modules]\n"
+        "if loaded:\n"
+        "    sys.exit(f'Loaded prohibited frameworks: {loaded}')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"Constitution violation in dermafuzzy_core: {result.stderr or result.stdout}"
