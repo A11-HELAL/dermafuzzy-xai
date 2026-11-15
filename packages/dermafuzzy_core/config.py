@@ -15,12 +15,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Final
 
 import yaml
 
-CANONICAL_FEATURE_NAMES: tuple[str, ...] = ("A", "B_fuzzy", "C", "D_verified")
-EPSILON_MAX_BOUND: float = 1e-2
+CANONICAL_FEATURE_NAMES: Final[tuple[str, ...]] = ("A", "B_fuzzy", "C", "D_verified")
+EPSILON_MAX_BOUND: Final[float] = 1e-2
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,36 +119,8 @@ def _validate_finite_float(
     return fval
 
 
-def validate_config(raw_dict: dict[str, Any]) -> DermaConfig:
-    """Validate a raw configuration dictionary and construct typed domain dataclasses.
-
-    Parameters
-    ----------
-    raw_dict : dict[str, Any]
-        Dictionary representation of configuration sections.
-
-    Returns
-    -------
-    DermaConfig
-        Validated, deeply-immutable DermaConfig instance.
-
-    Raises
-    ------
-    ValueError
-        If required sections are missing or if any domain validation rule is violated.
-    """
-    if not isinstance(raw_dict, dict):
-        raise ValueError(f"Configuration must be a dictionary, got {type(raw_dict).__name__}")
-
-    required_sections = {"dataset", "preprocessing", "biomarkers", "mamdani_fis"}
-    missing_sections = required_sections - raw_dict.keys()
-    if missing_sections:
-        raise ValueError(f"Missing required configuration sections: {sorted(missing_sections)}")
-
-    # --------------------------------------------------------------------------
-    # 1. Dataset Validation
-    # --------------------------------------------------------------------------
-    ds = raw_dict["dataset"]
+def _validate_dataset_section(ds: Any) -> DatasetConfig:
+    """Validate and construct the DatasetConfig domain dataclass."""
     if not isinstance(ds, dict):
         raise ValueError("Section 'dataset' must be a dictionary")
 
@@ -200,7 +172,7 @@ def validate_config(raw_dict: dict[str, Any]) -> DermaConfig:
     if not math.isclose(sum_splits, 1.0, abs_tol=1e-6):
         raise ValueError(f"dataset.split_ratios must sum to 1.0 (+/- 1e-6), got {sum_splits:.6f}")
 
-    dataset_config = DatasetConfig(
+    return DatasetConfig(
         name=ds_name,
         image_size=image_size,
         target_classes=MappingProxyType({"malignant": clean_val_m, "benign": clean_val_b}),
@@ -209,10 +181,9 @@ def validate_config(raw_dict: dict[str, Any]) -> DermaConfig:
         split_ratios=MappingProxyType(validated_splits),
     )
 
-    # --------------------------------------------------------------------------
-    # 2. Preprocessing Validation
-    # --------------------------------------------------------------------------
-    prep = raw_dict["preprocessing"]
+
+def _validate_preprocessing_section(prep: Any) -> PreprocessingConfig:
+    """Validate and construct the PreprocessingConfig domain dataclass."""
     if not isinstance(prep, dict):
         raise ValueError("Section 'preprocessing' must be a dictionary")
 
@@ -254,7 +225,7 @@ def validate_config(raw_dict: dict[str, Any]) -> DermaConfig:
         max_inclusive=EPSILON_MAX_BOUND,
     )
 
-    preprocessing_config = PreprocessingConfig(
+    return PreprocessingConfig(
         blackhat_kernel_size=blackhat_k,
         inpaint_radius=inpaint_r,
         clahe_clip_limit=clahe_clip,
@@ -265,10 +236,9 @@ def validate_config(raw_dict: dict[str, Any]) -> DermaConfig:
         eps=eps,
     )
 
-    # --------------------------------------------------------------------------
-    # 3. Biomarkers Validation
-    # --------------------------------------------------------------------------
-    bio = raw_dict["biomarkers"]
+
+def _validate_biomarkers_section(bio: Any) -> BiomarkersConfig:
+    """Validate and construct the BiomarkersConfig domain dataclass."""
     if not isinstance(bio, dict):
         raise ValueError("Section 'biomarkers' must be a dictionary")
 
@@ -297,16 +267,15 @@ def validate_config(raw_dict: dict[str, Any]) -> DermaConfig:
         raise ValueError(f"biomarkers.value_range must strictly be [0.0, 1.0] per Constitution, got [{vr_min}, {vr_max}]")
     value_range = (0.0, 1.0)
 
-    biomarkers_config = BiomarkersConfig(
+    return BiomarkersConfig(
         b_fuzzy_weights=MappingProxyType({"w_geo": w_geo, "w_grad": w_grad}),
         feature_names=feature_names,
         value_range=value_range,
     )
 
-    # --------------------------------------------------------------------------
-    # 4. Mamdani FIS Validation
-    # --------------------------------------------------------------------------
-    fis = raw_dict["mamdani_fis"]
+
+def _validate_mamdani_fis_section(fis: Any) -> MamdaniFISConfig:
+    """Validate and construct the MamdaniFISConfig domain dataclass."""
     if not isinstance(fis, dict):
         raise ValueError("Section 'mamdani_fis' must be a dictionary")
 
@@ -343,17 +312,44 @@ def validate_config(raw_dict: dict[str, Any]) -> DermaConfig:
         )
     risk_thresholds = {"low_max": low_max, "medium_max": med_max}
 
-    mamdani_config = MamdaniFISConfig(
+    return MamdaniFISConfig(
         percentiles=percentiles,
         defuzzification_method=defuzz,
         risk_thresholds=MappingProxyType(risk_thresholds),
     )
 
+
+def validate_config(raw_dict: dict[str, Any]) -> DermaConfig:
+    """Validate a raw configuration dictionary and construct typed domain dataclasses.
+
+    Parameters
+    ----------
+    raw_dict : dict[str, Any]
+        Dictionary representation of configuration sections.
+
+    Returns
+    -------
+    DermaConfig
+        Validated, deeply-immutable DermaConfig instance.
+
+    Raises
+    ------
+    ValueError
+        If required sections are missing or if any domain validation rule is violated.
+    """
+    if not isinstance(raw_dict, dict):
+        raise ValueError(f"Configuration must be a dictionary, got {type(raw_dict).__name__}")
+
+    required_sections = {"dataset", "preprocessing", "biomarkers", "mamdani_fis"}
+    missing_sections = required_sections - raw_dict.keys()
+    if missing_sections:
+        raise ValueError(f"Missing required configuration sections: {sorted(missing_sections)}")
+
     return DermaConfig(
-        dataset=dataset_config,
-        preprocessing=preprocessing_config,
-        biomarkers=biomarkers_config,
-        mamdani_fis=mamdani_config,
+        dataset=_validate_dataset_section(raw_dict["dataset"]),
+        preprocessing=_validate_preprocessing_section(raw_dict["preprocessing"]),
+        biomarkers=_validate_biomarkers_section(raw_dict["biomarkers"]),
+        mamdani_fis=_validate_mamdani_fis_section(raw_dict["mamdani_fis"]),
     )
 
 

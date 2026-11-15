@@ -20,6 +20,23 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Final
+
+SNAPSHOT_FILENAME: Final[str] = "LIVE_STATE_SNAPSHOT.md"
+CLIPBOARD_ENCODING: Final[str] = "utf-16le"
+NUM_RECENT_COMMITS: Final[int] = 5
+DEFAULT_IGNORE_DIRS: Final[frozenset[str]] = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".venv",
+        ".agents",
+        "dist",
+        "build",
+        ".gemini",
+    }
+)
 
 
 def run_cmd(args: list[str], cwd: Path | None = None) -> str:
@@ -41,25 +58,15 @@ def run_cmd(args: list[str], cwd: Path | None = None) -> str:
         return f"Error executing {args}: {e}"
 
 
-def generate_file_tree(dir_path: Path, prefix: str = "", ignore_dirs: set[str] | None = None) -> list[str]:
+def generate_file_tree(dir_path: Path, prefix: str = "", ignore_dirs: frozenset[str] | set[str] | None = None) -> list[str]:
     """Generate a clean visual ASCII file tree ignoring transient directories."""
-    if ignore_dirs is None:
-        ignore_dirs = {
-            ".git",
-            "__pycache__",
-            ".pytest_cache",
-            ".venv",
-            ".agents",
-            "dist",
-            "build",
-            ".gemini",
-        }
+    active_ignore = DEFAULT_IGNORE_DIRS if ignore_dirs is None else ignore_dirs
     lines: list[str] = []
     items = sorted(
         [
             p
             for p in dir_path.iterdir()
-            if p.name not in ignore_dirs
+            if p.name not in active_ignore
             and not p.name.endswith(".egg-info")
             and not p.name.endswith(".pyc")
         ],
@@ -181,7 +188,7 @@ def copy_to_windows_clipboard(text: str) -> bool:
     try:
         subprocess.run(
             ["clip.exe"],
-            input=text.encode("utf-16le"),
+            input=text.encode(CLIPBOARD_ENCODING),
             check=True,
         )
         return True
@@ -191,7 +198,7 @@ def copy_to_windows_clipboard(text: str) -> bool:
         if clip_path.exists():
             subprocess.run(
                 [str(clip_path)],
-                input=text.encode("utf-16le"),
+                input=text.encode(CLIPBOARD_ENCODING),
                 check=True,
             )
             return True
@@ -209,7 +216,7 @@ def main() -> None:
     # 1. Git metadata
     git_branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root)
     git_status = run_cmd(["git", "status", "--short", "--branch"], cwd=repo_root)
-    git_log = run_cmd(["git", "log", "-n", "5", "--oneline"], cwd=repo_root)
+    git_log = run_cmd(["git", "log", "-n", str(NUM_RECENT_COMMITS), "--oneline"], cwd=repo_root)
 
     # 2. File tree
     tree_lines = [f"{repo_root.name}/"] + generate_file_tree(repo_root)
@@ -249,7 +256,7 @@ def main() -> None:
 {git_status}
 ```
 
-### Recent Commits (Last 5)
+### Recent Commits (Last {NUM_RECENT_COMMITS})
 ```text
 {git_log if git_log else "(No commits recorded yet)"}
 ```
@@ -287,7 +294,7 @@ def main() -> None:
 """
 
     # Write snapshot file
-    target_path = repo_root / "LIVE_STATE_SNAPSHOT.md"
+    target_path = repo_root / SNAPSHOT_FILENAME
     target_path.write_text(snapshot, encoding="utf-8")
     print(f"Generated: {target_path} ({len(snapshot.splitlines())} lines, {len(snapshot)} bytes)")
 

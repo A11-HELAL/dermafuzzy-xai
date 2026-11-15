@@ -17,7 +17,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Final, Mapping, Sequence
 
 import numpy as np
 import skfuzzy as fuzz
@@ -27,6 +27,17 @@ from dermafuzzy_core.config import CANONICAL_FEATURE_NAMES, DermaConfig, load_co
 if TYPE_CHECKING:
     from dermafuzzy_core.biomarkers import BiomarkerResult
     from dermafuzzy_core.preprocessing import PreprocessingResult
+
+# Algorithmic & Defuzzification Constants
+MAMDANI_UNIVERSE_POINTS: Final[int] = 1001
+DEGENERATE_SEPARATION_DELTA: Final[float] = 1e-4
+CENTROID_POTENTIAL_ALPHA: Final[float] = 0.70
+PURE_LOW_CENTROID_BOUND: Final[float] = 13.166666666666664
+PURE_HIGH_CENTROID_BOUND: Final[float] = 85.90909090909089
+DEFAULT_FALLBACK_CENTROID: Final[float] = 50.0
+EPSILON_SUM_GUARD: Final[float] = 1e-4
+TIE_BREAK_EPSILON: Final[float] = 1e-6
+MIN_CALIBRATION_SAMPLES: Final[int] = 4
 
 
 # ------------------------------------------------------------------------------
@@ -121,8 +132,8 @@ class FISCalibration:
         generated_at: str,
         config_hash: str,
     ) -> None:
-        if isinstance(n_samples, bool) or not isinstance(n_samples, int) or n_samples < 4:
-            raise ValueError(f"n_samples must be an integer >= 4, got {n_samples!r}")
+        if isinstance(n_samples, bool) or not isinstance(n_samples, int) or n_samples < MIN_CALIBRATION_SAMPLES:
+            raise ValueError(f"n_samples must be an integer >= {MIN_CALIBRATION_SAMPLES}, got {n_samples!r}")
 
         expected_keys = set(CANONICAL_FEATURE_NAMES)
         actual_keys = set(cutoffs.keys())
@@ -143,9 +154,9 @@ class FISCalibration:
                     f"Strict monotonicity violated for '{feat}': must satisfy 0 < p25 < p50 < p75 < 1, "
                     f"got ({p25}, {p50}, {p75})"
                 )
-            if (p50 - p25) < 1e-4 - 1e-9 or (p75 - p50) < 1e-4 - 1e-9:
+            if (p50 - p25) < DEGENERATE_SEPARATION_DELTA - 1e-9 or (p75 - p50) < DEGENERATE_SEPARATION_DELTA - 1e-9:
                 raise ValueError(
-                    f"Degenerate separation guard violated for '{feat}': step must be >= 1e-4, "
+                    f"Degenerate separation guard violated for '{feat}': step must be >= {DEGENERATE_SEPARATION_DELTA}, "
                     f"got steps ({p50 - p25:.6e}, {p75 - p50:.6e})"
                 )
             validated_cutoffs[feat] = (float(p25), float(p50), float(p75))
@@ -436,6 +447,88 @@ def _s_potential(m: FuzzyMembershipSet) -> float:
     return 0.0 * m.low + 50.0 * m.medium + 100.0 * m.high
 
 
+def _fire_clinical_rules(
+    A_m: FuzzyMembershipSet,
+    B_m: FuzzyMembershipSet,
+    C_m: FuzzyMembershipSet,
+    D_m: FuzzyMembershipSet,
+) -> dict[str, float]:
+    """Evaluate 5 clinical fuzzy inference rules using Zadeh t-norm (min) and s-norm (max)."""
+    # Rule 1: IF A is High AND B is High AND C is High THEN Risk is High
+    w1 = min(A_m.high, B_m.high, C_m.high)
+
+    # Rule 2: IF B is High AND C is High AND D is High THEN Risk is High
+    w2 = min(B_m.high, C_m.high, D_m.high)
+
+    # Rule 3: IF (A is High OR B is High) AND D is High THEN Risk is High
+    w3 = min(max(A_m.high, B_m.high), D_m.high)
+
+    # Rule 4: IF B is Medium AND C is Medium AND D is Medium (or moderate features) THEN Risk is Medium
+    mean_medium = float(np.mean([A_m.medium, B_m.medium, C_m.medium, D_m.medium]))
+    w4 = max(min(B_m.medium, C_m.medium, D_m.medium), mean_medium)
+
+    # Rule 5: IF A is Low AND B is Low AND C is Low AND (D is Low OR D is Medium) THEN Risk is Low
+    w5 = min(A_m.low, B_m.low, C_m.low, max(D_m.low, D_m.medium))
+
+    return {
+        "R1": float(w1),
+        "R2": float(w2),
+        "R3": float(w3),
+        "R4": float(w4),
+        "R5": float(w5),
+    }
+
+
+def _defuzzify_mamdani_centroid(
+    firings: dict[str, float],
+    m_dict: dict[str, FuzzyMembershipSet],
+) -> float:
+    """Defuzzify via Mamdani centroid and smooth partition-of-unity risk potential blend."""
+    w_high = max(firings["R1"], firings["R2"], firings["R3"])
+    w_med = firings["R4"]
+    w_low = firings["R5"]
+
+    z = np.linspace(0.0, 100.0, MAMDANI_UNIVERSE_POINTS)
+    mf_low = fuzz.trapmf(z, [0.0, 0.0, 15.0, 35.0])
+    mf_med = fuzz.trimf(z, [25.0, 50.0, 75.0])
+    mf_high = fuzz.trapmf(z, [65.0, 80.0, 100.0, 100.0])
+
+    clip_low = np.fmin(w_low, mf_low)
+    clip_med = np.fmin(w_med, mf_med)
+    clip_high = np.fmin(w_high, mf_high)
+    agg = np.fmax(clip_low, np.fmax(clip_med, clip_high))
+
+    if float(np.sum(agg)) > EPSILON_SUM_GUARD:
+        raw_centroid = float(fuzz.defuzz(z, agg, "centroid"))
+    else:
+        raw_centroid = DEFAULT_FALLBACK_CENTROID
+
+    # Smooth Monotonic Partition-of-Unity Risk Potential (alpha=0.70)
+    s_mean = float(np.mean([_s_potential(m) for m in m_dict.values()]))
+    s_mapped = PURE_LOW_CENTROID_BOUND + (s_mean / 100.0) * (PURE_HIGH_CENTROID_BOUND - PURE_LOW_CENTROID_BOUND)
+
+    final_risk = (1.0 - CENTROID_POTENTIAL_ALPHA) * raw_centroid + CENTROID_POTENTIAL_ALPHA * s_mapped
+    return float(np.clip(final_risk, 0.0, 100.0))
+
+
+def _determine_dominant_rule(firings: dict[str, float]) -> tuple[str, str]:
+    """Resolve dominant clinical rule using fixed tie-break priority order."""
+    priority_order = ("R1", "R2", "R3", "R4", "R5")
+    dominant_rule_id = "R5"
+    max_firing = -1.0
+
+    for r_id in priority_order:
+        f_val = firings[r_id]
+        if f_val > max_firing + TIE_BREAK_EPSILON:
+            max_firing = f_val
+            dominant_rule_id = r_id
+
+    rule_lookup = {r.rule_id: r for r in CLINICAL_RULES}
+    dom_rule = rule_lookup[dominant_rule_id]
+    dominant_rule_text = f"{dom_rule.name}: {dom_rule.description}"
+    return dominant_rule_id, dominant_rule_text
+
+
 def evaluate_mamdani_fis(
     biomarkers: BiomarkerResult | tuple[float, float, float, float] | Sequence[float],
     calibration: FISCalibration,
@@ -471,71 +564,15 @@ def evaluate_mamdani_fis(
     scores = [_validate_score(v, CANONICAL_FEATURE_NAMES[i]) for i, v in enumerate(vec)]
 
     # Compute memberships per feature
-    m_dict: dict[str, FuzzyMembershipSet] = {}
-    for feat, s in zip(CANONICAL_FEATURE_NAMES, scores):
-        cutoffs = calibration.get_cutoffs(feat)
-        m_dict[feat] = compute_memberships(s, cutoffs)
-
-    A_m = m_dict["A"]
-    B_m = m_dict["B_fuzzy"]
-    C_m = m_dict["C"]
-    D_m = m_dict["D_verified"]
-
-    # Rule firings using Zadeh min (AND) and max (OR)
-    # Rule 1: IF A is High AND B is High AND C is High THEN Risk is High
-    w1 = min(A_m.high, B_m.high, C_m.high)
-
-    # Rule 2: IF B is High AND C is High AND D is High THEN Risk is High
-    w2 = min(B_m.high, C_m.high, D_m.high)
-
-    # Rule 3: IF (A is High OR B is High) AND D is High THEN Risk is High
-    w3 = min(max(A_m.high, B_m.high), D_m.high)
-
-    # Rule 4: IF B is Medium AND C is Medium AND D is Medium (or moderate features) THEN Risk is Medium
-    mean_medium = float(np.mean([A_m.medium, B_m.medium, C_m.medium, D_m.medium]))
-    w4 = max(min(B_m.medium, C_m.medium, D_m.medium), mean_medium)
-
-    # Rule 5: IF A is Low AND B is Low AND C is Low AND (D is Low OR D is Medium) THEN Risk is Low
-    w5 = min(A_m.low, B_m.low, C_m.low, max(D_m.low, D_m.medium))
-
-    firings: dict[str, float] = {
-        "R1": float(w1),
-        "R2": float(w2),
-        "R3": float(w3),
-        "R4": float(w4),
-        "R5": float(w5),
+    m_dict: dict[str, FuzzyMembershipSet] = {
+        feat: compute_memberships(s, calibration.get_cutoffs(feat))
+        for feat, s in zip(CANONICAL_FEATURE_NAMES, scores)
     }
 
-    # Consequent activations
-    w_high = max(w1, w2, w3)
-    w_med = w4
-    w_low = w5
-
-    # Consequent universe z in [0, 100] with 1001 points
-    z = np.linspace(0.0, 100.0, 1001)
-    mf_low = fuzz.trapmf(z, [0.0, 0.0, 15.0, 35.0])
-    mf_med = fuzz.trimf(z, [25.0, 50.0, 75.0])
-    mf_high = fuzz.trapmf(z, [65.0, 80.0, 100.0, 100.0])
-
-    clip_low = np.fmin(w_low, mf_low)
-    clip_med = np.fmin(w_med, mf_med)
-    clip_high = np.fmin(w_high, mf_high)
-    agg = np.fmax(clip_low, np.fmax(clip_med, clip_high))
-
-    if np.sum(agg) > 1e-4:
-        raw_centroid = float(fuzz.defuzz(z, agg, "centroid"))
-    else:
-        # Complete Partition Guard fallback
-        raw_centroid = 50.0
-
-    # Smooth Monotonic Partition-of-Unity Risk Potential (alpha=0.70)
-    s_mean = float(np.mean([_s_potential(m) for m in m_dict.values()]))
-    # Map s_mean in [0, 100] linearly across the pure Low (13.167) to pure High (85.909) bounds
-    s_mapped = 13.166666666666664 + (s_mean / 100.0) * (85.90909090909089 - 13.166666666666664)
-
-    alpha = 0.70
-    final_risk = (1.0 - alpha) * raw_centroid + alpha * s_mapped
-    final_risk = float(np.clip(final_risk, 0.0, 100.0))
+    firings = _fire_clinical_rules(
+        m_dict["A"], m_dict["B_fuzzy"], m_dict["C"], m_dict["D_verified"]
+    )
+    final_risk = _defuzzify_mamdani_centroid(firings, m_dict)
 
     # Determine risk category
     low_max = float(cfg.mamdani_fis.risk_thresholds["low_max"])
@@ -548,21 +585,7 @@ def evaluate_mamdani_fis(
     else:
         risk_category = "High"
 
-    # Dominant rule resolution (tie-break order: R1 > R2 > R3 > R4 > R5)
-    priority_order = ["R1", "R2", "R3", "R4", "R5"]
-    dominant_rule_id = "R5"
-    max_firing = -1.0
-
-    for r_id in priority_order:
-        f_val = firings[r_id]
-        if f_val > max_firing + 1e-6:
-            max_firing = f_val
-            dominant_rule_id = r_id
-
-    # Find dominant rule text
-    rule_lookup = {r.rule_id: r for r in CLINICAL_RULES}
-    dom_rule = rule_lookup[dominant_rule_id]
-    dominant_rule_text = f"{dom_rule.name}: {dom_rule.description}"
+    dominant_rule_id, dominant_rule_text = _determine_dominant_rule(firings)
 
     memberships_export: dict[str, dict[str, float]] = {
         feat: m.as_dict() for feat, m in m_dict.items()

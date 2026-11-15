@@ -17,9 +17,17 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import numpy as np
+
+# Training & Synthetic Cohort Constants
+SYNTHETIC_RANDOM_SEED: Final[int] = 42
+SYNTHETIC_TRAIN_COUNT: Final[int] = 24
+SYNTHETIC_TEST_COUNT: Final[int] = 16
+DEFAULT_EPOCHS: Final[int] = 10
+DEFAULT_BATCH_SIZE: Final[int] = 32
+DEFAULT_ARTIFACTS_DIR: Final[str] = "artifacts"
 
 # Ensure packages/ is on sys.path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -58,12 +66,12 @@ def run_synthetic_dry_run(output_dir: Path, config: DermaConfig) -> None:
     # Stage 1: Balanced Stratified Sampling (Synthetic Cohort)
     # -------------------------------------------------------------------------
     print("\n[STAGE 1/5] Generating Balanced Stratified Synthetic Cohort (N=40)...")
-    np.random.seed(42)
+    np.random.seed(SYNTHETIC_RANDOM_SEED)
 
     # 20 Benign cases (10 clean benign, 10 benign with ruler/gel artifacts)
     # 20 True Melanoma cases
-    n_train = 24
-    n_test = 16
+    n_train = SYNTHETIC_TRAIN_COUNT
+    n_test = SYNTHETIC_TEST_COUNT
 
     # Training biomarkers (clean distribution for calibration)
     # Train: 12 Benign (low ABCD) + 12 Melanoma (high ABCD)
@@ -251,9 +259,9 @@ def main() -> None:
     )
     parser.add_argument("--data-dir", type=str, default="data/HAM10000_images", help="Path to HAM10000 images")
     parser.add_argument("--metadata-csv", type=str, default="data/HAM10000_metadata.csv", help="Path to metadata CSV")
-    parser.add_argument("--output-dir", type=str, default="artifacts", help="Directory to export artifacts")
-    parser.add_argument("--epochs", type=int, default=10, help="Training epochs")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
+    parser.add_argument("--output-dir", type=str, default=DEFAULT_ARTIFACTS_DIR, help="Directory to export artifacts")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Training epochs")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Batch size")
 
     args = parser.parse_args()
     config = load_config()

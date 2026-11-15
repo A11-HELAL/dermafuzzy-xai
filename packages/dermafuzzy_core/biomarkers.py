@@ -17,13 +17,20 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import cv2
 import numpy as np
 
 from dermafuzzy_core.config import DermaConfig, load_config
 from dermafuzzy_core.gradcam import compute_attention_overlap, compute_verified_confidence
+
+# Domain and mathematical named constants
+MIN_MOMENT_AREA: Final[float] = 5.0
+CONTOUR_APPROX_EPS_RATIO: Final[float] = 0.004
+SOBEL_KERNEL_SIZE: Final[int] = 3
+COLOR_DISPERSION_SCALE: Final[float] = 1.35
+DEFAULT_EPSILON: Final[float] = 1e-6
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +90,7 @@ def _validate_rgb(clean_rgb: Any) -> np.ndarray:
 
 def compute_asymmetry(
     mask: Any,
-    eps: float = 1e-6,
+    eps: float = DEFAULT_EPSILON,
 ) -> float:
     """Compute rotation-invariant asymmetry score A in [0.0, 1.0].
 
@@ -104,7 +111,7 @@ def compute_asymmetry(
 
     M = cv2.moments(mask_u8)
     m00 = float(M["m00"])
-    if m00 < 5.0 or m00 <= eps:
+    if m00 < MIN_MOMENT_AREA or m00 <= eps:
         return 0.0
 
     cx = float(M["m10"]) / (m00 + eps)
@@ -193,7 +200,7 @@ def compute_border_fuzziness(
         c = max(contours, key=cv2.contourArea)
         raw_p = float(cv2.arcLength(c, True))
         # Polygon approximation smoothing to remove grid staircase discretization
-        approx_c = cv2.approxPolyDP(c, 0.004 * raw_p, True)
+        approx_c = cv2.approxPolyDP(c, CONTOUR_APPROX_EPS_RATIO * raw_p, True)
         p = float(cv2.arcLength(approx_c, True))
         area = float(cv2.contourArea(approx_c))
         if area <= eps or p <= eps:
@@ -208,8 +215,8 @@ def compute_border_fuzziness(
     lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
     L = lab[:, :, 0].astype(np.float64) / 255.0
 
-    gx = cv2.Sobel(L, cv2.CV_64F, 1, 0, ksize=3)
-    gy = cv2.Sobel(L, cv2.CV_64F, 0, 1, ksize=3)
+    gx = cv2.Sobel(L, cv2.CV_64F, 1, 0, ksize=SOBEL_KERNEL_SIZE)
+    gy = cv2.Sobel(L, cv2.CV_64F, 0, 1, ksize=SOBEL_KERNEL_SIZE)
     grad_mag = np.hypot(gx, gy)
 
     ring_pixels = (ring > 0)
@@ -240,7 +247,7 @@ def compute_border_fuzziness(
 def compute_color_variation(
     clean_rgb: Any,
     mask: Any,
-    eps: float = 1e-6,
+    eps: float = DEFAULT_EPSILON,
 ) -> float:
     """Compute multi-channel color variation score C in [0.0, 1.0].
 
@@ -288,7 +295,7 @@ def compute_color_variation(
         dispersions.append(0.5 * (std_val * 2.0 + idr_val))
 
     # Scale so solid colors evaluate to ~0.0 while 4-pigment quadrants evaluate to >= 0.45
-    c_score = 1.35 * float(np.mean(dispersions))
+    c_score = COLOR_DISPERSION_SCALE * float(np.mean(dispersions))
     return float(np.clip(c_score, 0.0, 1.0))
 
 

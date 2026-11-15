@@ -17,13 +17,20 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Final, Mapping, Sequence
 
 import numpy as np
 
 from dermafuzzy_core.biomarkers import BiomarkerResult
 from dermafuzzy_core.config import DermaConfig, load_config
 from dermafuzzy_core.fis_engine import FISCalibration, evaluate_mamdani_fis
+
+# Clinical evaluation named constants
+DEFAULT_DECISION_THRESHOLD: Final[float] = 0.50
+AUC_ROC_TIE_FALLBACK: Final[float] = 0.50
+TIER_1_KEY: Final[str] = "1_pure_mobilenetv2_blackbox"
+TIER_2_KEY: Final[str] = "2_crisp_abcd_fixed_thresholds"
+TIER_3_KEY: Final[str] = "3_proposed_dermafuzzy_xai"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +47,7 @@ class ClinicalMetrics:
     accuracy: float
     f1_score: float
     auc_roc: float
-    threshold: float = 0.50
+    threshold: float = DEFAULT_DECISION_THRESHOLD
 
     def __post_init__(self) -> None:
         """Validate counts, bounds, and immutability invariants."""
@@ -136,9 +143,9 @@ class AblationReport:
     def to_markdown_table(self) -> str:
         """Format ablation study results as a publication-grade GitHub Markdown table."""
         tier_display_names = {
-            "1_pure_mobilenetv2_blackbox": "Tier 1: Pure MobileNetV2 Black-Box",
-            "2_crisp_abcd_fixed_thresholds": "Tier 2: Crisp ABCD Fixed Thresholds",
-            "3_proposed_dermafuzzy_xai": "Tier 3: Proposed DermaFuzzy-XAI",
+            TIER_1_KEY: "Tier 1: Pure MobileNetV2 Black-Box",
+            TIER_2_KEY: "Tier 2: Crisp ABCD Fixed Thresholds",
+            TIER_3_KEY: "Tier 3: Proposed DermaFuzzy-XAI",
         }
 
         lines = [
@@ -222,7 +229,7 @@ def _validate_1d_array(arr: Any, name: str) -> np.ndarray:
 def compute_clinical_metrics(
     y_true: np.ndarray | Sequence[int],
     y_prob: np.ndarray | Sequence[float],
-    threshold: float = 0.50,
+    threshold: float = DEFAULT_DECISION_THRESHOLD,
 ) -> ClinicalMetrics:
     """Compute biostatistical clinical classification metrics and pure NumPy AUC-ROC.
 
@@ -289,7 +296,7 @@ def compute_clinical_metrics(
 
     # Exact Pure NumPy Tied-Score Trapezoidal AUC-ROC
     if pos_cases == 0 or neg_cases == 0 or np.all(yp == yp[0]):
-        auc_roc = 0.50
+        auc_roc = AUC_ROC_TIE_FALLBACK
     else:
         # Sort distinct thresholds in descending order
         distinct_v = np.sort(np.unique(yp))[::-1]
@@ -447,11 +454,11 @@ def run_ablation_study(
         )
 
     # Tier 1: Pure MobileNetV2 Black-Box
-    metrics_tier1 = compute_clinical_metrics(yt, p_cnn, threshold=0.50)
+    metrics_tier1 = compute_clinical_metrics(yt, p_cnn, threshold=DEFAULT_DECISION_THRESHOLD)
 
     # Tier 2: Crisp ABCD + Fixed Thresholds
     p_crisp = evaluate_crisp_abcd_baseline(mat, calibration)
-    metrics_tier2 = compute_clinical_metrics(yt, p_crisp, threshold=0.50)
+    metrics_tier2 = compute_clinical_metrics(yt, p_crisp, threshold=DEFAULT_DECISION_THRESHOLD)
 
     # Tier 3: Proposed DermaFuzzy-XAI
     p_fuzzy = np.zeros(n_samples, dtype=np.float64)
@@ -460,12 +467,12 @@ def run_ablation_study(
         fis_pred = evaluate_mamdani_fis(b_vec, calibration, config=config)
         p_fuzzy[i] = fis_pred.risk_score / 100.0
 
-    metrics_tier3 = compute_clinical_metrics(yt, p_fuzzy, threshold=0.50)
+    metrics_tier3 = compute_clinical_metrics(yt, p_fuzzy, threshold=DEFAULT_DECISION_THRESHOLD)
 
     tiers = {
-        "1_pure_mobilenetv2_blackbox": metrics_tier1,
-        "2_crisp_abcd_fixed_thresholds": metrics_tier2,
-        "3_proposed_dermafuzzy_xai": metrics_tier3,
+        TIER_1_KEY: metrics_tier1,
+        TIER_2_KEY: metrics_tier2,
+        TIER_3_KEY: metrics_tier3,
     }
 
     return AblationReport(tiers=tiers, sample_count=n_samples)

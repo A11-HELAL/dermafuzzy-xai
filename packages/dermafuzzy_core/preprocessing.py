@@ -15,12 +15,23 @@ Governed by Constitution Principles I, II, and IV. Zero top-level heavy ML frame
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import cv2
 import numpy as np
 
 from dermafuzzy_core.config import DermaConfig, load_config
+
+# Domain and algorithmic named constants
+BLACKHAT_RESPONSE_THRESHOLD: Final[float] = 12.0
+HAIR_BINARY_THRESHOLD: Final[int] = 14
+HAIR_OPENING_KERNEL_SIZE: Final[int] = 3
+VIGNETTING_BORDER_PERCENT: Final[float] = 0.02
+VIGNETTING_FG_THRESHOLD: Final[float] = 0.50
+FALLBACK_ELLIPSE_AXIS_RATIO: Final[float] = 0.35
+FALLBACK_ELLIPSE_ANGLE: Final[float] = 0.0
+FALLBACK_ELLIPSE_START_ANGLE: Final[float] = 0.0
+FALLBACK_ELLIPSE_END_ANGLE: Final[float] = 360.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,14 +95,14 @@ def remove_hair(
     blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
 
     # Dynamic thresholding: if max blackhat response is very low, uniform skin with no hairs
-    if float(blackhat.max()) < 12.0:
+    if float(blackhat.max()) < BLACKHAT_RESPONSE_THRESHOLD:
         hair_mask = np.zeros(gray.shape, dtype=np.uint8)
         inpainted_rgb = img_rgb.copy()
     else:
         # Isolate top dark fiber responses
-        _, hair_thresh = cv2.threshold(blackhat, 14, 255, cv2.THRESH_BINARY)
+        _, hair_thresh = cv2.threshold(blackhat, HAIR_BINARY_THRESHOLD, 255, cv2.THRESH_BINARY)
         # Suppress single-pixel noise with mild opening
-        k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (HAIR_OPENING_KERNEL_SIZE, HAIR_OPENING_KERNEL_SIZE))
         hair_mask = cv2.morphologyEx(hair_thresh, cv2.MORPH_OPEN, k3)
 
         if int(hair_mask.sum()) > 0:
@@ -138,6 +149,61 @@ def apply_lab_clahe(
     return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
 
 
+def _suppress_vignetting(binary: np.ndarray, h: int, w: int) -> None:
+    """Detect and zero optical vignetting artifacts around outer border perimeter."""
+    bw = max(1, int(VIGNETTING_BORDER_PERCENT * min(h, w)))
+    border_mask = np.zeros((h, w), dtype=bool)
+    border_mask[:bw, :] = True
+    border_mask[-bw:, :] = True
+    border_mask[:, :bw] = True
+    border_mask[:, -bw:] = True
+
+    border_fg_ratio = float(binary[border_mask].mean())
+    center_fg_ratio = float(binary[~border_mask].mean())
+    if border_fg_ratio > VIGNETTING_FG_THRESHOLD and center_fg_ratio < border_fg_ratio:
+        binary[border_mask] = 0
+
+
+def _extract_largest_connected_component(binary: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Extract primary lesion mask as the largest connected component and fill holes."""
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if num_labels <= 1:
+        return np.zeros((h, w), dtype=np.uint8)
+
+    largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    mask = (labels == largest_label).astype(np.uint8)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        cv2.drawContours(mask, contours, -1, 1, thickness=-1)
+    return mask
+
+
+def _generate_fallback_ellipse(h: int, w: int) -> np.ndarray:
+    """Generate deterministic centered elliptical fallback mask."""
+    mask = np.zeros((h, w), dtype=np.uint8)
+    axes = (int(FALLBACK_ELLIPSE_AXIS_RATIO * w), int(FALLBACK_ELLIPSE_AXIS_RATIO * h))
+    cv2.ellipse(
+        mask,
+        (w // 2, h // 2),
+        axes,
+        FALLBACK_ELLIPSE_ANGLE,
+        FALLBACK_ELLIPSE_START_ANGLE,
+        FALLBACK_ELLIPSE_END_ANGLE,
+        1,
+        -1,
+    )
+    return mask
+
+
+def _compute_boundary_ring(mask: np.ndarray, ring_kernel_size: int) -> np.ndarray:
+    """Derive morphological perilesional boundary ring R_edge = Dilate - Erode."""
+    k_ring = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring_kernel_size, ring_kernel_size))
+    m_outer = cv2.dilate(mask, k_ring)
+    m_inner = cv2.erode(mask, k_ring)
+    return (m_outer - m_inner).astype(np.uint8)
+
+
 def extract_lesion_mask_and_ring(
     clean_rgb: np.ndarray,
     config: DermaConfig | None = None,
@@ -162,66 +228,26 @@ def extract_lesion_mask_and_ring(
         config = load_config()
 
     h, w = clean_rgb.shape[:2]
-
-    # Convert to LAB to extract luminance
     lab = cv2.cvtColor(clean_rgb, cv2.COLOR_RGB2LAB)
     L = lab[:, :, 0]
 
-    # Step 1: Gaussian smoothing
     g_k = config.preprocessing.gaussian_blur_kernel
     blurred = cv2.GaussianBlur(L, (g_k, g_k), 0)
-
-    # Step 2: Inverse Otsu thresholding (lesion is typically darker than skin)
     _, binary = cv2.threshold(blurred, 0, 1, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # Step 3: Border-vignetting suppression
-    # Sample outer 2% perimeter
-    bw = max(1, int(0.02 * min(h, w)))
-    border_mask = np.zeros((h, w), dtype=bool)
-    border_mask[:bw, :] = True
-    border_mask[-bw:, :] = True
-    border_mask[:, :bw] = True
-    border_mask[:, -bw:] = True
-
-    border_fg_ratio = float(binary[border_mask].mean())
-    center_fg_ratio = float(binary[~border_mask].mean())
-    if border_fg_ratio > 0.50 and center_fg_ratio < border_fg_ratio:
-        # Optical vignetting artifact detected; clear border frame
-        binary[border_mask] = 0
-
-    # Step 4: Largest Connected Component (LCC)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    if num_labels <= 1:
-        mask = np.zeros((h, w), dtype=np.uint8)
-    else:
-        # Find largest foreground label (label > 0)
-        largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        mask = (labels == largest_label).astype(np.uint8)
-
-    # Fill internal holes inside the primary lesion mask
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours:
-        cv2.drawContours(mask, contours, -1, 1, thickness=-1)
+    _suppress_vignetting(binary, h, w)
+    mask = _extract_largest_connected_component(binary, h, w)
 
     area_ratio = float(mask.sum()) / float(h * w)
     min_bound, max_bound = config.preprocessing.mask_area_bounds
     fallback_used = False
 
-    # Step 5: Fallback check
     if area_ratio < min_bound or area_ratio > max_bound:
-        # Replace with deterministic centered ellipse
-        mask = np.zeros((h, w), dtype=np.uint8)
-        axes = (int(0.35 * w), int(0.35 * h))
-        cv2.ellipse(mask, (w // 2, h // 2), axes, 0, 0, 360, 1, -1)
+        mask = _generate_fallback_ellipse(h, w)
         area_ratio = float(mask.sum()) / float(h * w)
         fallback_used = True
 
-    # Step 6: Perilesional Boundary Ring (R_edge = Dilate - Erode)
-    r_k = config.preprocessing.boundary_ring_kernel
-    k_ring = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r_k, r_k))
-    m_outer = cv2.dilate(mask, k_ring)
-    m_inner = cv2.erode(mask, k_ring)
-    boundary_ring = (m_outer - m_inner).astype(np.uint8)
+    boundary_ring = _compute_boundary_ring(mask, config.preprocessing.boundary_ring_kernel)
 
     return mask, boundary_ring, area_ratio, fallback_used
 

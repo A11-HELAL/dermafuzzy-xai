@@ -12,16 +12,30 @@ Governed by Constitution Principles I, II, and IV. Zero top-level heavy ML frame
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Final
 
 import cv2
 import numpy as np
+
+DEFAULT_EPSILON: Final[float] = 1e-6
+
+
+def _validate_unit_interval_float(val: Any, name: str) -> float:
+    """Validate that val is a finite float in [0.0, 1.0], rejecting bool, NaN, and Inf."""
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise ValueError(f"{name} must be a float, got {type(val).__name__}")
+    fval = float(val)
+    if not math.isfinite(fval):
+        raise ValueError(f"{name} must be a finite float, got {fval}")
+    if not (0.0 <= fval <= 1.0):
+        raise ValueError(f"{name} must be within [0.0, 1.0], got {fval}")
+    return fval
 
 
 def compute_attention_overlap(
     heatmap: Any,
     mask: Any,
-    eps: float = 1e-6,
+    eps: float = DEFAULT_EPSILON,
 ) -> float:
     """Calculate spatial attention overlap alpha in [0.0, 1.0].
 
@@ -106,21 +120,8 @@ def compute_verified_confidence(
     ValueError
         If p_cnn or alpha are boolean, non-finite, or outside [0.0, 1.0].
     """
-    if isinstance(p_cnn, bool) or not isinstance(p_cnn, (int, float)):
-        raise ValueError(f"p_cnn must be a float, got {type(p_cnn).__name__}")
-    f_p_cnn = float(p_cnn)
-    if not math.isfinite(f_p_cnn):
-        raise ValueError(f"p_cnn must be a finite float, got {f_p_cnn}")
-    if not (0.0 <= f_p_cnn <= 1.0):
-        raise ValueError(f"p_cnn must be within [0.0, 1.0], got {f_p_cnn}")
-
-    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)):
-        raise ValueError(f"alpha must be a float, got {type(alpha).__name__}")
-    f_alpha = float(alpha)
-    if not math.isfinite(f_alpha):
-        raise ValueError(f"alpha must be a finite float, got {f_alpha}")
-    if not (0.0 <= f_alpha <= 1.0):
-        raise ValueError(f"alpha must be within [0.0, 1.0], got {f_alpha}")
+    f_p_cnn = _validate_unit_interval_float(p_cnn, "p_cnn")
+    f_alpha = _validate_unit_interval_float(alpha, "alpha")
 
     d_verified = f_p_cnn * f_alpha
     return float(np.clip(d_verified, 0.0, 1.0))

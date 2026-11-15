@@ -17,7 +17,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import cv2
 import numpy as np
@@ -26,16 +26,30 @@ from dermafuzzy_core.biomarkers import BiomarkerResult
 from dermafuzzy_core.fis_engine import FISPrediction
 from dermafuzzy_core.preprocessing import PreprocessingResult
 
+# Visualizer named constants
+DEFAULT_FIGSIZE: Final[tuple[float, float]] = (16.0, 4.5)
+DEFAULT_DPI: Final[int] = 300
+DEFAULT_CONTOUR_COLOR: Final[tuple[int, int, int]] = (0, 255, 0)      # Emerald green (RGB)
+DEFAULT_RING_COLOR: Final[tuple[int, int, int]] = (0, 255, 255)       # Cyan (RGB)
+DEFAULT_HEATMAP_ALPHA: Final[float] = 0.35
+
+BANNER_COLOR_LOW: Final[str] = "#28a745"
+BANNER_COLOR_MEDIUM: Final[str] = "#ffc107"
+BANNER_COLOR_HIGH: Final[str] = "#dc3545"
+BAR_COLOR_DOMINANT: Final[str] = "#dc3545"
+BAR_COLOR_DEFAULT: Final[str] = "#4a90e2"
+CENTROID_LINE_COLOR: Final[str] = "#212529"
+
 
 @dataclass(frozen=True, slots=True)
 class FourPanelReportConfig:
     """Configuration options for the 4-panel clinical XAI audit report."""
 
-    figsize: tuple[float, float] = (16.0, 4.5)
-    dpi: int = 300
-    contour_color: tuple[int, int, int] = (0, 255, 0)      # Emerald green (RGB)
-    ring_color: tuple[int, int, int] = (0, 255, 255)       # Cyan (RGB)
-    heatmap_alpha: float = 0.35
+    figsize: tuple[float, float] = DEFAULT_FIGSIZE
+    dpi: int = DEFAULT_DPI
+    contour_color: tuple[int, int, int] = DEFAULT_CONTOUR_COLOR
+    ring_color: tuple[int, int, int] = DEFAULT_RING_COLOR
+    heatmap_alpha: float = DEFAULT_HEATMAP_ALPHA
 
     def __post_init__(self) -> None:
         """Validate config parameters."""
@@ -91,6 +105,107 @@ def _overlay_heatmap(rgb: np.ndarray, heatmap: np.ndarray, alpha: float) -> np.n
 
     blended = (1.0 - alpha) * rgb.astype(np.float32) + alpha * jet_rgb.astype(np.float32)
     return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def _render_panel_1_lesion(
+    ax: Any,
+    clean_rgb: np.ndarray,
+    lesion_mask: np.ndarray,
+    biomarker_result: BiomarkerResult,
+    config: FourPanelReportConfig,
+) -> None:
+    """Render Panel 1: Lesion contour overlay and A / C biomarker readouts."""
+    panel_img = _overlay_contour(clean_rgb, lesion_mask, config.contour_color)
+    ax.imshow(panel_img)
+    ax.set_title(
+        f"1. Lesion Contour\nAsym A={biomarker_result.A:.3f} | Color C={biomarker_result.C:.3f}",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.axis("off")
+
+
+def _render_panel_2_boundary(
+    ax: Any,
+    clean_rgb: np.ndarray,
+    boundary_ring: np.ndarray,
+    biomarker_result: BiomarkerResult,
+    config: FourPanelReportConfig,
+) -> None:
+    """Render Panel 2: Cyan perilesional boundary ring overlay and B_geo / B_grad / B_fuzzy readouts."""
+    panel_img = _overlay_ring(clean_rgb, boundary_ring, config.ring_color)
+    ax.imshow(panel_img)
+    ax.set_title(
+        f"2. Boundary Ring (Cyan)\nB_geo={biomarker_result.B_geo:.3f} | B_grad={biomarker_result.B_grad:.3f}\nTotal B_fuzzy={biomarker_result.B_fuzzy:.3f}",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.axis("off")
+
+
+def _render_panel_3_attention(
+    ax: Any,
+    clean_rgb: np.ndarray,
+    heatmap: np.ndarray,
+    biomarker_result: BiomarkerResult,
+    config: FourPanelReportConfig,
+) -> None:
+    """Render Panel 3: Attention heatmap overlay with overlap alpha and D_verified readouts."""
+    panel_img = _overlay_heatmap(clean_rgb, heatmap, config.heatmap_alpha)
+    ax.imshow(panel_img)
+    ax.set_title(
+        f"3. Attention Verification\nOverlap α={biomarker_result.alpha:.3f}\nD_verified={biomarker_result.D_verified:.3f}",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.axis("off")
+
+
+def _render_panel_4_rules(ax: Any, fis_prediction: FISPrediction) -> None:
+    """Render Panel 4: Horizontal Mamdani rule firing strengths, centroid line, and decision banner."""
+    rule_labels = ["R1 (Low)", "R2 (Early)", "R3 (Border)", "R4 (Invasive)", "R5 (Veto)"]
+    rule_keys = ["R1", "R2", "R3", "R4", "R5"]
+    firings = [float(fis_prediction.rule_firings.get(k, 0.0)) for k in rule_keys]
+
+    dominant_key = (
+        getattr(fis_prediction, "dominant_rule_id", None)
+        or (getattr(fis_prediction.dominant_rule, "rule_id", None) if hasattr(fis_prediction, "dominant_rule") else None)
+        or "R1"
+    )
+    bar_colors = [BAR_COLOR_DOMINANT if k == dominant_key else BAR_COLOR_DEFAULT for k in rule_keys]
+
+    y_pos = np.arange(len(rule_labels))
+    ax.barh(y_pos, firings, color=bar_colors, edgecolor="black", height=0.6)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(rule_labels, fontsize=9)
+    ax.set_xlim(0.0, 1.05)
+    ax.set_xlabel("Firing Strength", fontsize=9)
+    ax.grid(axis="x", linestyle="--", alpha=0.5)
+
+    risk_pct = float(fis_prediction.risk_score)
+    risk_ratio = risk_pct / 100.0
+    ax.axvline(risk_ratio, color=CENTROID_LINE_COLOR, linestyle=":", linewidth=1.8, label=f"Risk: {risk_pct:.1f}%")
+    ax.legend(loc="lower right", fontsize=8)
+
+    cat = fis_prediction.risk_category
+    if "Low" in cat:
+        banner_bg = BANNER_COLOR_LOW
+        banner_fg = "white"
+    elif "Medium" in cat:
+        banner_bg = BANNER_COLOR_MEDIUM
+        banner_fg = "black"
+    else:
+        banner_bg = BANNER_COLOR_HIGH
+        banner_fg = "white"
+
+    banner_text = f"DECISION: {cat.upper()} ({risk_pct:.1f}%)"
+    ax.set_title(
+        banner_text,
+        fontsize=10,
+        fontweight="bold",
+        color=banner_fg,
+        bbox=dict(boxstyle="round,pad=0.4", facecolor=banner_bg, edgecolor="none"),
+    )
 
 
 def render_four_panel_report(
@@ -170,91 +285,16 @@ def render_four_panel_report(
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-    # Prepare rendered image components
-    clean_rgb = prep_result.clean_rgb
-    panel1_img = _overlay_contour(clean_rgb, prep_result.lesion_mask, config.contour_color)
-    panel2_img = _overlay_ring(clean_rgb, prep_result.boundary_ring, config.ring_color)
-    panel3_img = _overlay_heatmap(clean_rgb, heatmap, config.heatmap_alpha)
-
     # Setup headless figure and canvas
     fig = Figure(figsize=config.figsize, dpi=config.dpi)
     canvas = FigureCanvasAgg(fig)
     axes = fig.subplots(1, 4)
 
-    # Panel 1: Lesion Segmentation
-    axes[0].imshow(panel1_img)
-    axes[0].set_title(
-        f"1. Lesion Contour\nAsym A={biomarker_result.A:.3f} | Color C={biomarker_result.C:.3f}",
-        fontsize=10,
-        fontweight="bold",
-    )
-    axes[0].axis("off")
-
-    # Panel 2: Boundary Fuzziness
-    axes[1].imshow(panel2_img)
-    axes[1].set_title(
-        f"2. Boundary Ring (Cyan)\nB_geo={biomarker_result.B_geo:.3f} | B_grad={biomarker_result.B_grad:.3f}\nTotal B_fuzzy={biomarker_result.B_fuzzy:.3f}",
-        fontsize=10,
-        fontweight="bold",
-    )
-    axes[1].axis("off")
-
-    # Panel 3: Attention Verification
-    axes[2].imshow(panel3_img)
-    axes[2].set_title(
-        f"3. Attention Verification\nOverlap α={biomarker_result.alpha:.3f}\nD_verified={biomarker_result.D_verified:.3f}",
-        fontsize=10,
-        fontweight="bold",
-    )
-    axes[2].axis("off")
-
-    # Panel 4: Mamdani Rule Firings & Decision Banner
-    rule_labels = ["R1 (Low)", "R2 (Early)", "R3 (Border)", "R4 (Invasive)", "R5 (Veto)"]
-    rule_keys = ["R1", "R2", "R3", "R4", "R5"]
-    firings = [float(fis_prediction.rule_firings.get(k, 0.0)) for k in rule_keys]
-
-    # Identify dominant rule
-    dominant_key = (
-        getattr(fis_prediction, "dominant_rule_id", None)
-        or (getattr(fis_prediction.dominant_rule, "rule_id", None) if hasattr(fis_prediction, "dominant_rule") else None)
-        or "R1"
-    )
-    bar_colors = ["#dc3545" if k == dominant_key else "#4a90e2" for k in rule_keys]
-
-    y_pos = np.arange(len(rule_labels))
-    axes[3].barh(y_pos, firings, color=bar_colors, edgecolor="black", height=0.6)
-    axes[3].set_yticks(y_pos)
-    axes[3].set_yticklabels(rule_labels, fontsize=9)
-    axes[3].set_xlim(0.0, 1.05)
-    axes[3].set_xlabel("Firing Strength", fontsize=9)
-    axes[3].grid(axis="x", linestyle="--", alpha=0.5)
-
-    # Vertical line showing crisp Centroid Risk %
-    risk_pct = float(fis_prediction.risk_score)
-    risk_ratio = risk_pct / 100.0
-    axes[3].axvline(risk_ratio, color="#212529", linestyle=":", linewidth=1.8, label=f"Risk: {risk_pct:.1f}%")
-    axes[3].legend(loc="lower right", fontsize=8)
-
-    # Color-coded clinical decision banner
-    cat = fis_prediction.risk_category
-    if "Low" in cat:
-        banner_bg = "#28a745"
-        banner_fg = "white"
-    elif "Medium" in cat:
-        banner_bg = "#ffc107"
-        banner_fg = "black"
-    else:
-        banner_bg = "#dc3545"
-        banner_fg = "white"
-
-    banner_text = f"DECISION: {cat.upper()} ({risk_pct:.1f}%)"
-    axes[3].set_title(
-        banner_text,
-        fontsize=10,
-        fontweight="bold",
-        color=banner_fg,
-        bbox=dict(boxstyle="round,pad=0.4", facecolor=banner_bg, edgecolor="none"),
-    )
+    clean_rgb = prep_result.clean_rgb
+    _render_panel_1_lesion(axes[0], clean_rgb, prep_result.lesion_mask, biomarker_result, config)
+    _render_panel_2_boundary(axes[1], clean_rgb, prep_result.boundary_ring, biomarker_result, config)
+    _render_panel_3_attention(axes[2], clean_rgb, heatmap, biomarker_result, config)
+    _render_panel_4_rules(axes[3], fis_prediction)
 
     fig.tight_layout()
 
