@@ -1,0 +1,4 @@
+tier,tp,tn,fp,fn,sensitivity,specificity,precision,accuracy,f1_score,auc_roc,threshold
+1_pure_mobilenetv2_blackbox,8,4,4,0,1.000000,0.500000,0.666667,0.750000,0.800000,0.859375,0.5000
+2_crisp_abcd_fixed_thresholds,8,8,0,0,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,0.5000
+3_proposed_dermafuzzy_xai,8,8,0,0,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,0.5000

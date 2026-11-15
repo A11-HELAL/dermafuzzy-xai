@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test Suite & Constitution Verification
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: Constitution Principle I - Pure Core Verification
+        run: |
+          python -c "import dermafuzzy_core, sys; assert 'tensorflow' not in sys.modules, 'TensorFlow leaked into pure core'; assert 'torch' not in sys.modules, 'PyTorch leaked into pure core'; assert 'keras' not in sys.modules, 'Keras leaked into pure core'; print('Constitution Principle I: PASSED (Zero ML Skew)')"
+
+      - name: Run Full Unit & Metamorphic Test Suite
+        run: |
+          pytest -v tests/
+
+      - name: Run Colab Trainer Dry-Run Smoke Test
+        run: |
+          python services/colab_trainer/train_ham10000.py --dry-run-synthetic
