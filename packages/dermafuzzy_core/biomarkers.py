@@ -104,7 +104,7 @@ def compute_asymmetry(
 
     M = cv2.moments(mask_u8)
     m00 = float(M["m00"])
-    if m00 <= eps:
+    if m00 < 5.0 or m00 <= eps:
         return 0.0
 
     cx = float(M["m10"]) / (m00 + eps)

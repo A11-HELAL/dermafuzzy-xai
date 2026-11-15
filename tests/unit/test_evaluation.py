@@ -311,3 +311,83 @@ class TestAblationStudy:
         csv_str = report.to_csv()
         assert "tier,tp,tn,fp,fn" in csv_str
         assert "3_proposed_dermafuzzy_xai" in csv_str
+
+
+class TestAblationReportDataclass:
+    """Test AblationReport immutability and input validation."""
+
+    def test_immutability_and_mapping_proxy(self):
+        metrics = ClinicalMetrics(
+            tp=1, tn=1, fp=0, fn=0,
+            sensitivity=1.0, specificity=1.0, precision=1.0,
+            accuracy=1.0, f1_score=1.0, auc_roc=1.0,
+        )
+        report = AblationReport(
+            tiers={"tier1": metrics},
+            sample_count=2,
+            generated_at="2026-11-15T12:00:00+00:00",
+        )
+        assert report.sample_count == 2
+        # Mutation of tiers must raise TypeError
+        with pytest.raises(TypeError):
+            report.tiers["tier1"] = metrics  # type: ignore
+
+    @pytest.mark.parametrize(
+        ("bad_sample_count", "match_str"),
+        [
+            (-1, "sample_count"),
+            (True, "sample_count"),
+            ("10", "sample_count"),
+        ],
+    )
+    def test_reject_invalid_sample_count(self, bad_sample_count, match_str):
+        with pytest.raises(ValueError, match=match_str):
+            AblationReport(tiers={}, sample_count=bad_sample_count)
+
+    def test_reject_invalid_tiers_elements(self):
+        with pytest.raises(ValueError, match="ClinicalMetrics"):
+            AblationReport(tiers={"t1": "not_metrics"}, sample_count=1)  # type: ignore
+
+        with pytest.raises(ValueError, match="non-empty string"):
+            AblationReport(tiers={"": ClinicalMetrics(tp=0, tn=0, fp=0, fn=0, sensitivity=0, specificity=0, precision=0, accuracy=0, f1_score=0, auc_roc=0)}, sample_count=1)
+
+    def test_reject_invalid_generated_at(self):
+        with pytest.raises(ValueError, match="generated_at"):
+            AblationReport(tiers={}, sample_count=0, generated_at="")
+
+
+class TestAUCROCEdgeCases:
+    """Test edge cases and permutation invariance for AUC-ROC calculation."""
+
+    def test_threshold_boundary_zero_and_one(self):
+        y_true = np.array([1, 0, 1, 0])
+        y_prob = np.array([0.9, 0.4, 0.8, 0.2])
+
+        # threshold=0.0: all predictions are positive
+        m_zero = compute_clinical_metrics(y_true, y_prob, threshold=0.0)
+        assert m_zero.tp == 2
+        assert m_zero.fp == 2
+        assert m_zero.tn == 0
+        assert m_zero.fn == 0
+
+        # threshold=1.0: no prediction is positive
+        m_one = compute_clinical_metrics(y_true, y_prob, threshold=1.0)
+        assert m_one.tp == 0
+        assert m_one.fp == 0
+        assert m_one.tn == 2
+        assert m_one.fn == 2
+
+    def test_tied_auc_roc_permutation_invariance(self):
+        """Verify sorting order of identical tied scores does not alter AUC-ROC."""
+        y_true = np.array([0, 0, 1, 0, 1, 1, 0, 1, 0, 1])
+        y_prob = np.array([0.1, 0.4, 0.4, 0.4, 0.6, 0.7, 0.7, 0.7, 0.9, 0.9])
+
+        m_base = compute_clinical_metrics(y_true, y_prob)
+
+        # Shuffle with fixed seed
+        rng = np.random.default_rng(123)
+        perm = rng.permutation(len(y_true))
+        m_shuffled = compute_clinical_metrics(y_true[perm], y_prob[perm])
+
+        assert math.isclose(m_base.auc_roc, m_shuffled.auc_roc, abs_tol=1e-9)
+

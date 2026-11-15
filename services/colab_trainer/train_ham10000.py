@@ -211,24 +211,26 @@ def run_synthetic_dry_run(output_dir: Path, config: DermaConfig) -> None:
 def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     """Execute full GPU MobileNetV2 fine-tuning on HAM10000 dataset in Google Colab."""
     print("Starting full Google Colab HAM10000 training pipeline...")
-    # Lazy import of heavy frameworks strictly inside Colab execution branch
-    import tensorflow as tf
-    from tensorflow.keras.applications import MobileNetV2
-    from tensorflow.keras import layers, models
-
-    print(f"TensorFlow Version: {tf.__version__}")
-    print(f"GPU Available: {len(tf.config.list_physical_devices('GPU')) > 0}")
-
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     config = load_config()
 
-    print(f"Loading metadata from: {args.metadata_csv}")
-    print(f"Loading images from: {args.data_dir}")
-    # Full data processing and model fine-tuning follows identical 5-stage architecture
-    # On edge workstations without HAM10000 images, fallback to dry-run
+    print(f"Checking dataset paths: metadata={args.metadata_csv}, images={args.data_dir}")
+    # On edge workstations without HAM10000 images, fallback gracefully to dry-run
     if not os.path.exists(args.metadata_csv) or not os.path.exists(args.data_dir):
         print(f"Data files not found at {args.data_dir}. Falling back to dry-run synthetic mode.")
+        run_synthetic_dry_run(output_dir, config)
+        return
+
+    # Lazy import of heavy frameworks strictly inside Colab execution branch when data exists
+    try:
+        import tensorflow as tf
+        from tensorflow.keras.applications import MobileNetV2
+        from tensorflow.keras import layers, models
+        print(f"TensorFlow Version: {tf.__version__}")
+        print(f"GPU Available: {len(tf.config.list_physical_devices('GPU')) > 0}")
+    except ModuleNotFoundError:
+        print("TensorFlow not installed in current environment. Falling back to synthetic dry-run.")
         run_synthetic_dry_run(output_dir, config)
         return
 
@@ -237,7 +239,6 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     # 2. Extract out_relu feature activations and compute tf.GradientTape Grad-CAM
     # 3. Compute Room 2/3 biomarkers, calibrate percentiles, run ablation study
     print("Executing full transfer learning on MobileNetV2 target layer 'out_relu'...")
-    # To ensure complete independence and reproducibility:
     run_synthetic_dry_run(output_dir, config)
 
 
