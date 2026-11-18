@@ -225,7 +225,7 @@ def run_synthetic_dry_run(output_dir: Path, config: DermaConfig) -> None:
 
 
 def run_full_colab_pipeline(args: argparse.Namespace) -> None:
-    """Execute full 5-stage HAM10000 MobileNetV2 training and ablation pipeline."""
+    """Execute Q1-grade 5-stage HAM10000 MobileNetV2 training, 4-Way TTA Grad-CAM, and ablation pipeline."""
     config = load_config()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -240,38 +240,49 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     import cv2
     import pandas as pd
     import tensorflow as tf
-    from sklearn.model_selection import train_test_split
+    from sklearn.model_selection import StratifiedGroupKFold
     from dermafuzzy_core.biomarkers import extract_abcd_biomarkers
     from dermafuzzy_core.preprocessing import preprocess_image
 
     print("=" * 70)
-    print("DERMAFUZZY-XAI REAL HAM10000 TRAINING & XAI PIPELINE")
+    print("DERMAFUZZY-XAI Q1 HAM10000 TRAINING & XAI PIPELINE (TWO-STAGE + 4-WAY TTA)")
     print("=" * 70)
     print(f"TensorFlow: {tf.__version__} | GPUs: {len(tf.config.list_physical_devices('GPU'))}")
 
-    # [STAGE 1/5] Stratified Balanced Sampling (1,000 mel + 1,000 nv)
-    print("\n[STAGE 1/5] Loading & Balancing HAM10000 Dataset...")
+    # [STAGE 1/5] Leak-Free Lesion-ID Group-Stratified Sampling (All mel + 2x nv)
+    print("\n[STAGE 1/5] Loading HAM10000 with Leak-Free Lesion-ID Grouping...")
     df = pd.read_csv(metadata_csv)
     mel_code = config.dataset.target_classes["malignant"]
     nv_code = config.dataset.target_classes["benign"]
-    n_per_class = config.dataset.samples_per_class
     seed = config.dataset.random_state
 
-    df_mel = df[df["dx"] == mel_code].sample(n=min(n_per_class, len(df[df["dx"] == mel_code])), random_state=seed)
-    df_nv = df[df["dx"] == nv_code].sample(n=min(n_per_class, len(df[df["dx"] == nv_code])), random_state=seed)
-    df_bal = pd.concat([df_mel, df_nv], ignore_index=True).sample(frac=1.0, random_state=seed).reset_index(drop=True)
-    df_bal["label"] = (df_bal["dx"] == mel_code).astype(int)
+    df_mel = df[df["dx"] == mel_code].copy()
+    n_nv_target = min(len(df_mel) * 2, len(df[df["dx"] == nv_code]))
+    df_nv = df[df["dx"] == nv_code].sample(n=n_nv_target, random_state=seed).copy()
+    df_all = pd.concat([df_mel, df_nv], ignore_index=True).sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    df_all["label"] = (df_all["dx"] == mel_code).astype(int)
 
     image_index = {p.stem: p for p in data_dir.rglob("*.jpg")}
-    df_bal["path"] = df_bal["image_id"].map(image_index)
-    df_bal = df_bal.dropna(subset=["path"]).reset_index(drop=True)
+    df_all["path"] = df_all["image_id"].map(image_index)
+    df_all = df_all.dropna(subset=["path"]).reset_index(drop=True)
 
-    train_r = config.dataset.split_ratios["train"]
-    val_r = config.dataset.split_ratios["val"]
-    test_r = config.dataset.split_ratios["test"]
-    train_df, temp_df = train_test_split(df_bal, test_size=(val_r + test_r), stratify=df_bal["label"], random_state=seed)
-    val_df, test_df = train_test_split(temp_df, test_size=test_r / (val_r + test_r), stratify=temp_df["label"], random_state=seed)
-    print(f"  Balanced Splits -> Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
+    groups = df_all["lesion_id"] if "lesion_id" in df_all.columns else df_all["image_id"]
+    sgkf_outer = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
+    trainval_idx, test_idx = next(sgkf_outer.split(df_all, df_all["label"], groups))
+    trainval_df = df_all.iloc[trainval_idx].reset_index(drop=True)
+    raw_test_df = df_all.iloc[test_idx].reset_index(drop=True)
+
+    test_mel = raw_test_df[raw_test_df["label"] == 1]
+    test_nv = raw_test_df[raw_test_df["label"] == 0].sample(n=min(len(test_mel), len(raw_test_df[raw_test_df["label"] == 0])), random_state=seed)
+    test_df = pd.concat([test_mel, test_nv], ignore_index=True).sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+    tv_groups = trainval_df["lesion_id"] if "lesion_id" in trainval_df.columns else trainval_df["image_id"]
+    sgkf_inner = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
+    tr_idx, va_idx = next(sgkf_inner.split(trainval_df, trainval_df["label"], tv_groups))
+    train_df = trainval_df.iloc[tr_idx].reset_index(drop=True)
+    val_df = trainval_df.iloc[va_idx].reset_index(drop=True)
+
+    print(f"  Leak-Free Lesion-Grouped Splits -> Train: {len(train_df)}, Val: {len(val_df)}, Balanced Test: {len(test_df)}")
 
     # [STAGE 2/5] Room 2 OpenCV Preprocessing
     print("\n[STAGE 2/5] Running Room 2 OpenCV Preprocessing (Black-Hat + Telea + LAB CLAHE + Ring)...")
@@ -296,51 +307,70 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     X_val_cnn = tf.keras.applications.mobilenet_v2.preprocess_input(X_val_raw.copy())
     X_test_cnn = tf.keras.applications.mobilenet_v2.preprocess_input(X_test_raw.copy())
 
-    # [STAGE 3/5] MobileNetV2 Transfer Learning & Grad-CAM ('out_relu')
-    print(f"\n[STAGE 3/5] Fine-Tuning MobileNetV2 for {args.epochs} epochs (batch_size={args.batch_size})...")
+    # [STAGE 3/5] Two-Stage MobileNetV2 Transfer Learning & 4-Way TTA Grad-CAM ('out_relu')
+    print("\n[STAGE 3/5] Two-Stage Fine-Tuning MobileNetV2 (Stage 3a Head Warmup -> Stage 3b Backbone)...")
     h, w = config.dataset.image_size[1], config.dataset.image_size[0]
     base_model = tf.keras.applications.MobileNetV2(weights="imagenet", include_top=False, input_shape=(h, w, 3))
-    for layer in base_model.layers[:-20]:
-        layer.trainable = False
-    for layer in base_model.layers:
-        if isinstance(layer, tf.keras.layers.BatchNormalization):
-            layer.trainable = False
+    base_model.trainable = False
 
     x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
+    x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Dropout(0.45)(x)
-    out = tf.keras.layers.Dense(
-        1, activation="sigmoid", kernel_regularizer=tf.keras.regularizers.l2(1e-4)
-    )(x)
+    x = tf.keras.layers.Dense(128, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+    x = tf.keras.layers.Dropout(0.30)(x)
+    out = tf.keras.layers.Dense(1, activation="sigmoid", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
     model = tf.keras.Model(inputs=base_model.input, outputs=out)
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=2e-4),
-        loss="binary_crossentropy",
-        metrics=["accuracy", tf.keras.metrics.AUC(name="auc")],
-    )
 
     n_neg, n_pos = int((y_train == 0).sum()), int((y_train == 1).sum())
     class_weight = {0: len(y_train) / (2.0 * max(n_neg, 1)), 1: len(y_train) / (2.0 * max(n_pos, 1))}
-    early_stop = tf.keras.callbacks.EarlyStopping(monitor="val_auc", mode="max", patience=5, restore_best_weights=True)
-    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-6)
+    loss_fn = tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05)
+
+    def _augment(imgs, lbls):
+        imgs = tf.image.random_flip_left_right(imgs)
+        imgs = tf.image.random_flip_up_down(imgs)
+        k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
+        imgs = tf.image.rot90(imgs, k=k)
+        imgs = tf.image.random_brightness(imgs, max_delta=0.10)
+        imgs = tf.image.random_contrast(imgs, lower=0.90, upper=1.10)
+        imgs = tf.clip_by_value(imgs, -1.0, 1.0)
+        return imgs, lbls
 
     aug_ds = (
         tf.data.Dataset.from_tensor_slices((X_train_cnn, y_train))
         .shuffle(len(X_train_cnn), seed=seed)
         .batch(args.batch_size)
-        .map(
-            lambda imgs, lbls: (
-                tf.image.random_flip_up_down(tf.image.random_flip_left_right(imgs)),
-                lbls,
-            ),
-            num_parallel_calls=tf.data.AUTOTUNE,
-        )
+        .map(_augment, num_parallel_calls=tf.data.AUTOTUNE)
         .prefetch(tf.data.AUTOTUNE)
     )
+
+    # Stage 3a: Head Warmup (5 epochs)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+        loss=loss_fn,
+        metrics=["accuracy", tf.keras.metrics.AUC(name="auc")],
+    )
+    model.fit(aug_ds, validation_data=(X_val_cnn, y_val), epochs=5, class_weight=class_weight, verbose=1)
+
+    # Stage 3b: Unfreeze Top 55 Layers (Keep all BatchNormalization frozen)
+    base_model.trainable = True
+    for layer in base_model.layers[:-55]:
+        layer.trainable = False
+    for layer in base_model.layers:
+        if isinstance(layer, tf.keras.layers.BatchNormalization):
+            layer.trainable = False
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1.5e-4),
+        loss=loss_fn,
+        metrics=["accuracy", tf.keras.metrics.AUC(name="auc")],
+    )
+    early_stop = tf.keras.callbacks.EarlyStopping(monitor="val_auc", mode="max", patience=6, restore_best_weights=True)
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-6)
 
     model.fit(
         aug_ds,
         validation_data=(X_val_cnn, y_val),
-        epochs=max(args.epochs, 15),
+        epochs=max(args.epochs, 20),
         class_weight=class_weight,
         callbacks=[early_stop, reduce_lr],
         verbose=1,
@@ -366,25 +396,35 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
                     hm_local = hm_local / hm_local.max()
                 return float(np.clip(pred[0, 0].numpy(), 0.0, 1.0)), hm_local
 
-            p_val, hm = _single_gradcam(img_orig)
+            p0, hm0 = _single_gradcam(img_orig)
             if use_tta:
-                p_flip, hm_flip = _single_gradcam(img_orig[:, :, ::-1, :].copy())
-                p_val = 0.5 * (p_val + p_flip)
-                hm = 0.5 * (hm + hm_flip[:, ::-1])
+                p1, hm1 = _single_gradcam(img_orig[:, :, ::-1, :].copy())
+                p2, hm2 = _single_gradcam(img_orig[:, ::-1, :, :].copy())
+                p3, hm3 = _single_gradcam(img_orig[:, ::-1, ::-1, :].copy())
+                p_val = 0.25 * (p0 + p1 + p2 + p3)
+                hm = 0.25 * (hm0 + hm1[:, ::-1] + hm2[::-1, :] + hm3[::-1, ::-1])
                 if hm.max() > 0.0:
                     hm = hm / hm.max()
+            else:
+                p_val, hm = p0, hm0
 
-            bio = extract_abcd_biomarkers(clean_rgb=prep.clean_rgb, mask=prep.lesion_mask, boundary_ring=prep.boundary_ring, config=config, p_cnn=p_val, heatmap=hm)
+            bio = extract_abcd_biomarkers(
+                clean_rgb=prep.clean_rgb,
+                mask=prep.lesion_mask,
+                boundary_ring=prep.boundary_ring,
+                config=config,
+                p_cnn=p_val,
+                heatmap=hm,
+            )
             probs.append(p_val)
             heatmaps.append(hm)
             bios.append(bio)
         return np.asarray(probs, dtype=np.float64), heatmaps, bios
 
-    print("\nExtracting Grad-CAM heatmaps & Room 3 ABCD Biomarkers...")
-    _, _, train_bios = _extract_split_biomarkers(train_preps, X_train_cnn)
+    print("\nExtracting 4-Way TTA Grad-CAM heatmaps & Room 3 ABCD Biomarkers...")
+    _, _, train_bios = _extract_split_biomarkers(train_preps, X_train_cnn, use_tta=False)
     p_test_raw, test_heatmaps, test_bios = _extract_split_biomarkers(test_preps, X_test_cnn, use_tta=True)
 
-    # Diagnostic Per-Biomarker Telemetry on Unseen Test Split
     fb_rate = 100.0 * sum(1 for p in test_preps if p.fallback_used) / max(len(test_preps), 1)
     print(f"\n[DIAGNOSTIC TELEMETRY] Test Fallback Mask Rate: {fb_rate:.1f}% | Mean alpha: {np.mean([b.alpha for b in test_bios]):.3f}")
     for feat_name, vals in [
@@ -406,7 +446,7 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     save_calibration_json(calibration, output_dir / "fis_calibration.json")
 
     # [STAGE 5/5] Unseen Test-Set 3-Tier Ablation Study & 4-Panel Clinical XAI Figure
-    print(f"\n[STAGE 5/5] Evaluating 3-Tier Ablation Study on Unseen Test Split (N={len(test_bios)})...")
+    print(f"\n[STAGE 5/5] Evaluating 3-Tier Ablation Study on Unseen Balanced Test Split (N={len(test_bios)})...")
     report = run_ablation_study(y_test, p_test_raw, test_bios, calibration, config)
     md_table = report.to_markdown_table()
     (output_dir / "ablation_report.md").write_text(md_table, encoding="utf-8")
@@ -424,7 +464,7 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     )
 
     print("\n" + "=" * 70)
-    print("REAL HAM10000 3-TIER ABLATION STUDY RESULTS (UNSEEN TEST SET):")
+    print("REAL HAM10000 3-TIER ABLATION STUDY RESULTS (UNSEEN LESION-GROUPED TEST SET):")
     print("=" * 70)
     print(md_table)
     print("=" * 70)
