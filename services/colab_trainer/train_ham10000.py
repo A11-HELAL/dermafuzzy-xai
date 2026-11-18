@@ -363,7 +363,7 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
             if hm.max() > 0.0:
                 hm = hm / hm.max()
             p_val = float(np.clip(pred[0, 0].numpy(), 0.0, 1.0))
-            bio = extract_abcd_biomarkers(prep.clean_rgb, prep.lesion_mask, prep.boundary_ring, p_val, hm, config)
+            bio = extract_abcd_biomarkers(prep.clean_rgb, prep.lesion_mask, prep.boundary_ring, p_val, hm, config=config)
             probs.append(p_val)
             heatmaps.append(hm)
             bios.append(bio)
