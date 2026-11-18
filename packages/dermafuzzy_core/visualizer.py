@@ -163,7 +163,7 @@ def _render_panel_3_attention(
 
 def _render_panel_4_rules(ax: Any, fis_prediction: FISPrediction) -> None:
     """Render Panel 4: Horizontal Mamdani rule firing strengths, centroid line, and decision banner."""
-    rule_labels = ["R1 (Low)", "R2 (Early)", "R3 (Border)", "R4 (Invasive)", "R5 (Veto)"]
+    rule_labels = ["R1 (ABCD High)", "R2 (Deep+Rim High)", "R3 (Early High)", "R4 (Borderline Med)", "R5 (Benign / Guard)"]
     rule_keys = ["R1", "R2", "R3", "R4", "R5"]
     firings = [float(fis_prediction.rule_firings.get(k, 0.0)) for k in rule_keys]
 
