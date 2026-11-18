@@ -250,8 +250,7 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     print(f"TensorFlow: {tf.__version__} | GPUs: {len(tf.config.list_physical_devices('GPU'))}")
 
     # [STAGE 1/5] Stratified Balanced Sampling (1,000 mel + 1,000 nv)
-    print("
-[STAGE 1/5] Loading & Balancing HAM10000 Dataset...")
+    print("\n[STAGE 1/5] Loading & Balancing HAM10000 Dataset...")
     df = pd.read_csv(metadata_csv)
     mel_code = config.dataset.target_classes["malignant"]
     nv_code = config.dataset.target_classes["benign"]
@@ -275,8 +274,7 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     print(f"  Balanced Splits -> Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
     # [STAGE 2/5] Room 2 OpenCV Preprocessing
-    print("
-[STAGE 2/5] Running Room 2 OpenCV Preprocessing (Black-Hat + Telea + LAB CLAHE + Ring)...")
+    print("\n[STAGE 2/5] Running Room 2 OpenCV Preprocessing (Black-Hat + Telea + LAB CLAHE + Ring)...")
     def _prep_split(split_df: pd.DataFrame):
         preps, cnn_imgs, labels = [], [], []
         for row in split_df.itertuples():
@@ -299,8 +297,7 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     X_test_cnn = tf.keras.applications.mobilenet_v2.preprocess_input(X_test_raw.copy())
 
     # [STAGE 3/5] MobileNetV2 Transfer Learning & Grad-CAM ('out_relu')
-    print(f"
-[STAGE 3/5] Fine-Tuning MobileNetV2 for {args.epochs} epochs (batch_size={args.batch_size})...")
+    print(f"\n[STAGE 3/5] Fine-Tuning MobileNetV2 for {args.epochs} epochs (batch_size={args.batch_size})...")
     h, w = config.dataset.image_size[1], config.dataset.image_size[0]
     base_model = tf.keras.applications.MobileNetV2(weights="imagenet", include_top=False, input_shape=(h, w, 3))
     for layer in base_model.layers[:-30]:
@@ -349,27 +346,23 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
             bios.append(bio)
         return np.asarray(probs, dtype=np.float64), heatmaps, bios
 
-    print("
-Extracting Grad-CAM heatmaps & Room 3 ABCD Biomarkers...")
+    print("\nExtracting Grad-CAM heatmaps & Room 3 ABCD Biomarkers...")
     _, _, train_bios = _extract_split_biomarkers(train_preps, X_train_cnn)
     p_test_raw, test_heatmaps, test_bios = _extract_split_biomarkers(test_preps, X_test_cnn)
 
     # [STAGE 4/5] Leak-Free Mamdani FIS Calibration on Train Split Only
-    print("
-[STAGE 4/5] Calibrating Mamdani FIS Percentiles on Train Split (N={})...".format(len(train_bios)))
+    print(f"\n[STAGE 4/5] Calibrating Mamdani FIS Percentiles on Train Split (N={len(train_bios)})...")
     train_matrix = np.asarray([b.as_vector() for b in train_bios], dtype=np.float64)
     calibration = calibrate_fis_percentiles(train_matrix, config)
     save_calibration_json(calibration, output_dir / "fis_calibration.json")
 
     # [STAGE 5/5] Unseen Test-Set 3-Tier Ablation Study & 4-Panel Clinical XAI Figure
-    print("
-[STAGE 5/5] Evaluating 3-Tier Ablation Study on Unseen Test Split (N={})...".format(len(test_bios)))
+    print(f"\n[STAGE 5/5] Evaluating 3-Tier Ablation Study on Unseen Test Split (N={len(test_bios)})...")
     report = run_ablation_study(y_test, p_test_raw, test_bios, calibration, config)
     md_table = report.to_markdown_table()
     (output_dir / "ablation_report.md").write_text(md_table, encoding="utf-8")
     (output_dir / "ablation_metrics.csv").write_text(report.to_csv(), encoding="utf-8")
 
-    # Render 4-panel figure for highest-risk true melanoma in test split
     mel_indices = [i for i, lbl in enumerate(y_test) if lbl == 1]
     best_idx = max(mel_indices, key=lambda i: evaluate_mamdani_fis(test_bios[i], calibration, config).risk_score)
     best_pred = evaluate_mamdani_fis(test_bios[best_idx], calibration, config)
@@ -381,8 +374,7 @@ Extracting Grad-CAM heatmaps & Room 3 ABCD Biomarkers...")
         output_path=output_dir / "sample_4panel_xai.png",
     )
 
-    print("
-" + "=" * 70)
+    print("\n" + "=" * 70)
     print("REAL HAM10000 3-TIER ABLATION STUDY RESULTS (UNSEEN TEST SET):")
     print("=" * 70)
     print(md_table)
