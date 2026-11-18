@@ -225,43 +225,169 @@ def run_synthetic_dry_run(output_dir: Path, config: DermaConfig) -> None:
 
 
 def run_full_colab_pipeline(args: argparse.Namespace) -> None:
-    """Execute full GPU MobileNetV2 fine-tuning on HAM10000 dataset in Google Colab.
-
-    Parameters
-    ----------
-    args : argparse.Namespace
-        CLI arguments specifying dataset paths, output directory, and training hyperparameters.
-    """
-    print("Starting full Google Colab HAM10000 training pipeline...")
+    """Execute full 5-stage HAM10000 MobileNetV2 training and ablation pipeline."""
+    config = load_config()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    config = load_config()
+    data_dir = Path(args.data_dir)
+    metadata_csv = Path(args.metadata_csv)
 
-    print(f"Checking dataset paths: metadata={args.metadata_csv}, images={args.data_dir}")
-    # On edge workstations without HAM10000 images, fallback gracefully to dry-run
-    if not os.path.exists(args.metadata_csv) or not os.path.exists(args.data_dir):
-        print(f"Data files not found at {args.data_dir}. Falling back to dry-run synthetic mode.")
+    if not data_dir.is_dir() or not metadata_csv.is_file():
+        print(f"Dataset files not found at {data_dir}. Falling back to dry-run synthetic mode.")
         run_synthetic_dry_run(output_dir, config)
         return
 
-    # Lazy import of heavy frameworks strictly inside Colab execution branch when data exists
-    try:
-        import tensorflow as tf
-        from tensorflow.keras.applications import MobileNetV2
-        from tensorflow.keras import layers, models
-        print(f"TensorFlow Version: {tf.__version__}")
-        print(f"GPU Available: {len(tf.config.list_physical_devices('GPU')) > 0}")
-    except ModuleNotFoundError:
-        print("TensorFlow not installed in current environment. Falling back to synthetic dry-run.")
-        run_synthetic_dry_run(output_dir, config)
-        return
+    import cv2
+    import pandas as pd
+    import tensorflow as tf
+    from sklearn.model_selection import train_test_split
+    from dermafuzzy_core.biomarkers import extract_abcd_biomarkers
+    from dermafuzzy_core.preprocessing import preprocess_image
 
-    # In actual Colab with HAM10000 downloaded:
-    # 1. Filter 1000 'mel' and 1000 'nv' from metadata
-    # 2. Extract out_relu feature activations and compute tf.GradientTape Grad-CAM
-    # 3. Compute Room 2/3 biomarkers, calibrate percentiles, run ablation study
-    print("Executing full transfer learning on MobileNetV2 target layer 'out_relu'...")
-    run_synthetic_dry_run(output_dir, config)
+    print("=" * 70)
+    print("DERMAFUZZY-XAI REAL HAM10000 TRAINING & XAI PIPELINE")
+    print("=" * 70)
+    print(f"TensorFlow: {tf.__version__} | GPUs: {len(tf.config.list_physical_devices('GPU'))}")
+
+    # [STAGE 1/5] Stratified Balanced Sampling (1,000 mel + 1,000 nv)
+    print("
+[STAGE 1/5] Loading & Balancing HAM10000 Dataset...")
+    df = pd.read_csv(metadata_csv)
+    mel_code = config.dataset.target_classes["malignant"]
+    nv_code = config.dataset.target_classes["benign"]
+    n_per_class = config.dataset.samples_per_class
+    seed = config.dataset.random_state
+
+    df_mel = df[df["dx"] == mel_code].sample(n=min(n_per_class, len(df[df["dx"] == mel_code])), random_state=seed)
+    df_nv = df[df["dx"] == nv_code].sample(n=min(n_per_class, len(df[df["dx"] == nv_code])), random_state=seed)
+    df_bal = pd.concat([df_mel, df_nv], ignore_index=True).sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    df_bal["label"] = (df_bal["dx"] == mel_code).astype(int)
+
+    image_index = {p.stem: p for p in data_dir.rglob("*.jpg")}
+    df_bal["path"] = df_bal["image_id"].map(image_index)
+    df_bal = df_bal.dropna(subset=["path"]).reset_index(drop=True)
+
+    train_r = config.dataset.split_ratios["train"]
+    val_r = config.dataset.split_ratios["val"]
+    test_r = config.dataset.split_ratios["test"]
+    train_df, temp_df = train_test_split(df_bal, test_size=(val_r + test_r), stratify=df_bal["label"], random_state=seed)
+    val_df, test_df = train_test_split(temp_df, test_size=test_r / (val_r + test_r), stratify=temp_df["label"], random_state=seed)
+    print(f"  Balanced Splits -> Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
+
+    # [STAGE 2/5] Room 2 OpenCV Preprocessing
+    print("
+[STAGE 2/5] Running Room 2 OpenCV Preprocessing (Black-Hat + Telea + LAB CLAHE + Ring)...")
+    def _prep_split(split_df: pd.DataFrame):
+        preps, cnn_imgs, labels = [], [], []
+        for row in split_df.itertuples():
+            bgr = cv2.imread(str(row.path))
+            if bgr is None:
+                continue
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            prep = preprocess_image(rgb, config)
+            preps.append(prep)
+            cnn_imgs.append(prep.clean_rgb.astype(np.float32))
+            labels.append(int(row.label))
+        return preps, np.asarray(cnn_imgs, dtype=np.float32), np.asarray(labels, dtype=np.int32)
+
+    train_preps, X_train_raw, y_train = _prep_split(train_df)
+    _, X_val_raw, y_val = _prep_split(val_df)
+    test_preps, X_test_raw, y_test = _prep_split(test_df)
+
+    X_train_cnn = tf.keras.applications.mobilenet_v2.preprocess_input(X_train_raw.copy())
+    X_val_cnn = tf.keras.applications.mobilenet_v2.preprocess_input(X_val_raw.copy())
+    X_test_cnn = tf.keras.applications.mobilenet_v2.preprocess_input(X_test_raw.copy())
+
+    # [STAGE 3/5] MobileNetV2 Transfer Learning & Grad-CAM ('out_relu')
+    print(f"
+[STAGE 3/5] Fine-Tuning MobileNetV2 for {args.epochs} epochs (batch_size={args.batch_size})...")
+    h, w = config.dataset.image_size[1], config.dataset.image_size[0]
+    base_model = tf.keras.applications.MobileNetV2(weights="imagenet", include_top=False, input_shape=(h, w, 3))
+    for layer in base_model.layers[:-30]:
+        layer.trainable = False
+
+    x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+    model = tf.keras.Model(inputs=base_model.input, outputs=out)
+    model.compile(optimizer=tf.keras.optimizers.Adam(1e-4), loss="binary_crossentropy", metrics=["accuracy"])
+
+    n_neg, n_pos = int((y_train == 0).sum()), int((y_train == 1).sum())
+    class_weight = {0: len(y_train) / (2.0 * max(n_neg, 1)), 1: len(y_train) / (2.0 * max(n_pos, 1))}
+    early_stop = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
+
+    model.fit(
+        X_train_cnn, y_train,
+        validation_data=(X_val_cnn, y_val),
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        class_weight=class_weight,
+        callbacks=[early_stop],
+        verbose=1,
+    )
+    model.save(output_dir / "mobilenetv2_ham10000.keras")
+
+    grad_model = tf.keras.Model(inputs=model.input, outputs=[model.get_layer("out_relu").output, model.output])
+
+    def _extract_split_biomarkers(preps, X_cnn):
+        probs, heatmaps, bios = [], [], []
+        for idx, prep in enumerate(preps):
+            img_t = tf.convert_to_tensor(X_cnn[idx : idx + 1])
+            with tf.GradientTape() as tape:
+                conv_out, pred = grad_model(img_t, training=False)
+                loss = pred[:, 0]
+            grads = tape.gradient(loss, conv_out)
+            pooled = tf.reduce_mean(grads, axis=(1, 2))[0].numpy()
+            hm = np.sum(conv_out[0].numpy() * pooled, axis=-1)
+            hm = np.maximum(hm, 0.0)
+            if hm.max() > 0.0:
+                hm = hm / hm.max()
+            p_val = float(np.clip(pred[0, 0].numpy(), 0.0, 1.0))
+            bio = extract_abcd_biomarkers(prep, p_val, hm, config)
+            probs.append(p_val)
+            heatmaps.append(hm)
+            bios.append(bio)
+        return np.asarray(probs, dtype=np.float64), heatmaps, bios
+
+    print("
+Extracting Grad-CAM heatmaps & Room 3 ABCD Biomarkers...")
+    _, _, train_bios = _extract_split_biomarkers(train_preps, X_train_cnn)
+    p_test_raw, test_heatmaps, test_bios = _extract_split_biomarkers(test_preps, X_test_cnn)
+
+    # [STAGE 4/5] Leak-Free Mamdani FIS Calibration on Train Split Only
+    print("
+[STAGE 4/5] Calibrating Mamdani FIS Percentiles on Train Split (N={})...".format(len(train_bios)))
+    train_matrix = np.asarray([b.as_vector() for b in train_bios], dtype=np.float64)
+    calibration = calibrate_fis_percentiles(train_matrix, config)
+    save_calibration_json(calibration, output_dir / "fis_calibration.json")
+
+    # [STAGE 5/5] Unseen Test-Set 3-Tier Ablation Study & 4-Panel Clinical XAI Figure
+    print("
+[STAGE 5/5] Evaluating 3-Tier Ablation Study on Unseen Test Split (N={})...".format(len(test_bios)))
+    report = run_ablation_study(y_test, p_test_raw, test_bios, calibration, config)
+    md_table = report.to_markdown_table()
+    (output_dir / "ablation_report.md").write_text(md_table, encoding="utf-8")
+    (output_dir / "ablation_metrics.csv").write_text(report.to_csv(), encoding="utf-8")
+
+    # Render 4-panel figure for highest-risk true melanoma in test split
+    mel_indices = [i for i, lbl in enumerate(y_test) if lbl == 1]
+    best_idx = max(mel_indices, key=lambda i: evaluate_mamdani_fis(test_bios[i], calibration, config).risk_score)
+    best_pred = evaluate_mamdani_fis(test_bios[best_idx], calibration, config)
+    render_four_panel_report(
+        test_preps[best_idx],
+        test_bios[best_idx],
+        best_pred,
+        test_heatmaps[best_idx],
+        output_path=output_dir / "sample_4panel_xai.png",
+    )
+
+    print("
+" + "=" * 70)
+    print("REAL HAM10000 3-TIER ABLATION STUDY RESULTS (UNSEEN TEST SET):")
+    print("=" * 70)
+    print(md_table)
+    print("=" * 70)
+
 
 
 def main() -> None:
