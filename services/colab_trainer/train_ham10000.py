@@ -349,20 +349,31 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
 
     grad_model = tf.keras.Model(inputs=model.input, outputs=[model.get_layer("out_relu").output, model.output])
 
-    def _extract_split_biomarkers(preps, X_cnn):
+    def _extract_split_biomarkers(preps, X_cnn, use_tta: bool = False):
         probs, heatmaps, bios = [], [], []
         for idx, prep in enumerate(preps):
-            img_t = tf.convert_to_tensor(X_cnn[idx : idx + 1])
-            with tf.GradientTape() as tape:
-                conv_out, pred = grad_model(img_t, training=False)
-                loss = pred[:, 0]
-            grads = tape.gradient(loss, conv_out)
-            pooled = tf.reduce_mean(grads, axis=(1, 2))[0].numpy()
-            hm = np.sum(conv_out[0].numpy() * pooled, axis=-1)
-            hm = np.maximum(hm, 0.0)
-            if hm.max() > 0.0:
-                hm = hm / hm.max()
-            p_val = float(np.clip(pred[0, 0].numpy(), 0.0, 1.0))
+            img_orig = X_cnn[idx : idx + 1]
+            def _single_gradcam(arr):
+                img_t = tf.convert_to_tensor(arr)
+                with tf.GradientTape() as tape:
+                    conv_out, pred = grad_model(img_t, training=False)
+                    loss = pred[:, 0]
+                grads = tape.gradient(loss, conv_out)
+                pooled = tf.reduce_mean(grads, axis=(1, 2))[0].numpy()
+                hm_local = np.sum(conv_out[0].numpy() * pooled, axis=-1)
+                hm_local = np.maximum(hm_local, 0.0)
+                if hm_local.max() > 0.0:
+                    hm_local = hm_local / hm_local.max()
+                return float(np.clip(pred[0, 0].numpy(), 0.0, 1.0)), hm_local
+
+            p_val, hm = _single_gradcam(img_orig)
+            if use_tta:
+                p_flip, hm_flip = _single_gradcam(img_orig[:, :, ::-1, :].copy())
+                p_val = 0.5 * (p_val + p_flip)
+                hm = 0.5 * (hm + hm_flip[:, ::-1])
+                if hm.max() > 0.0:
+                    hm = hm / hm.max()
+
             bio = extract_abcd_biomarkers(clean_rgb=prep.clean_rgb, mask=prep.lesion_mask, boundary_ring=prep.boundary_ring, config=config, p_cnn=p_val, heatmap=hm)
             probs.append(p_val)
             heatmaps.append(hm)
@@ -371,7 +382,22 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
 
     print("\nExtracting Grad-CAM heatmaps & Room 3 ABCD Biomarkers...")
     _, _, train_bios = _extract_split_biomarkers(train_preps, X_train_cnn)
-    p_test_raw, test_heatmaps, test_bios = _extract_split_biomarkers(test_preps, X_test_cnn)
+    p_test_raw, test_heatmaps, test_bios = _extract_split_biomarkers(test_preps, X_test_cnn, use_tta=True)
+
+    # Diagnostic Per-Biomarker Telemetry on Unseen Test Split
+    fb_rate = 100.0 * sum(1 for p in test_preps if p.fallback_used) / max(len(test_preps), 1)
+    print(f"\n[DIAGNOSTIC TELEMETRY] Test Fallback Mask Rate: {fb_rate:.1f}% | Mean alpha: {np.mean([b.alpha for b in test_bios]):.3f}")
+    for feat_name, vals in [
+        ("A (Asymmetry)", [b.A for b in test_bios]),
+        ("B_geo", [b.B_geo for b in test_bios]),
+        ("B_grad", [b.B_grad for b in test_bios]),
+        ("B_fuzzy", [b.B_fuzzy for b in test_bios]),
+        ("C (Color)", [b.C for b in test_bios]),
+        ("P_CNN (Raw)", p_test_raw),
+        ("D_verified", [b.D_verified for b in test_bios]),
+    ]:
+        f_auc = compute_clinical_metrics(y_test, vals).auc_roc
+        print(f"  Feature AUC-ROC | {feat_name:15s}: {f_auc:.4f}")
 
     # [STAGE 4/5] Leak-Free Mamdani FIS Calibration on Train Split Only
     print(f"\n[STAGE 4/5] Calibrating Mamdani FIS Percentiles on Train Split (N={len(train_bios)})...")

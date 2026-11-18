@@ -31,7 +31,9 @@ if TYPE_CHECKING:
 # Algorithmic & Defuzzification Constants
 MAMDANI_UNIVERSE_POINTS: Final[int] = 1001
 DEGENERATE_SEPARATION_DELTA: Final[float] = 1e-4
-CENTROID_POTENTIAL_ALPHA: Final[float] = 0.70
+CENTROID_POTENTIAL_ALPHA: Final[float] = 0.78
+RAW_RANK_BLEND: Final[float] = 0.20
+CLINICAL_EVIDENCE_WEIGHTS: Final[dict[str, float]] = {"A": 0.12, "B_fuzzy": 0.12, "C": 0.12, "D_verified": 0.64}
 PURE_LOW_CENTROID_BOUND: Final[float] = 13.166666666666664
 PURE_HIGH_CENTROID_BOUND: Final[float] = 85.90909090909089
 DEFAULT_FALLBACK_CENTROID: Final[float] = 50.0
@@ -486,6 +488,7 @@ def _fire_clinical_rules(
 def _defuzzify_mamdani_centroid(
     firings: dict[str, float],
     m_dict: dict[str, FuzzyMembershipSet],
+    scores: Sequence[float] | None = None,
 ) -> float:
     """Defuzzify via Mamdani centroid and smooth partition-of-unity risk potential blend."""
     w_high = max(firings["R1"], firings["R2"], firings["R3"])
@@ -507,8 +510,13 @@ def _defuzzify_mamdani_centroid(
     else:
         raw_centroid = DEFAULT_FALLBACK_CENTROID
 
-    # Smooth Monotonic Partition-of-Unity Risk Potential (alpha=0.70)
-    s_mean = float(np.mean([_s_potential(m) for m in m_dict.values()]))
+    # Clinical Evidence-Weighted Monotonic Potential + Continuous Rank Preservation
+    fuzzy_pot = float(sum(CLINICAL_EVIDENCE_WEIGHTS[k] * _s_potential(m_dict[k]) for k in CANONICAL_FEATURE_NAMES))
+    if scores is not None:
+        raw_pot = float(sum(CLINICAL_EVIDENCE_WEIGHTS[k] * (100.0 * s) for k, s in zip(CANONICAL_FEATURE_NAMES, scores)))
+        s_mean = (1.0 - RAW_RANK_BLEND) * fuzzy_pot + RAW_RANK_BLEND * raw_pot
+    else:
+        s_mean = fuzzy_pot
     s_mapped = PURE_LOW_CENTROID_BOUND + (s_mean / 100.0) * (PURE_HIGH_CENTROID_BOUND - PURE_LOW_CENTROID_BOUND)
 
     final_risk = (1.0 - CENTROID_POTENTIAL_ALPHA) * raw_centroid + CENTROID_POTENTIAL_ALPHA * s_mapped
@@ -576,7 +584,7 @@ def evaluate_mamdani_fis(
     firings = _fire_clinical_rules(
         m_dict["A"], m_dict["B_fuzzy"], m_dict["C"], m_dict["D_verified"]
     )
-    final_risk = _defuzzify_mamdani_centroid(firings, m_dict)
+    final_risk = _defuzzify_mamdani_centroid(firings, m_dict, scores)
 
     # Determine risk category
     low_max = float(cfg.mamdani_fis.risk_thresholds["low_max"])
