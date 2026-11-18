@@ -300,26 +300,49 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     print(f"\n[STAGE 3/5] Fine-Tuning MobileNetV2 for {args.epochs} epochs (batch_size={args.batch_size})...")
     h, w = config.dataset.image_size[1], config.dataset.image_size[0]
     base_model = tf.keras.applications.MobileNetV2(weights="imagenet", include_top=False, input_shape=(h, w, 3))
-    for layer in base_model.layers[:-30]:
+    for layer in base_model.layers[:-20]:
         layer.trainable = False
+    for layer in base_model.layers:
+        if isinstance(layer, tf.keras.layers.BatchNormalization):
+            layer.trainable = False
 
     x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
-    x = tf.keras.layers.Dropout(0.3)(x)
-    out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+    x = tf.keras.layers.Dropout(0.45)(x)
+    out = tf.keras.layers.Dense(
+        1, activation="sigmoid", kernel_regularizer=tf.keras.regularizers.l2(1e-4)
+    )(x)
     model = tf.keras.Model(inputs=base_model.input, outputs=out)
-    model.compile(optimizer=tf.keras.optimizers.Adam(1e-4), loss="binary_crossentropy", metrics=["accuracy"])
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=2e-4),
+        loss="binary_crossentropy",
+        metrics=["accuracy", tf.keras.metrics.AUC(name="auc")],
+    )
 
     n_neg, n_pos = int((y_train == 0).sum()), int((y_train == 1).sum())
     class_weight = {0: len(y_train) / (2.0 * max(n_neg, 1)), 1: len(y_train) / (2.0 * max(n_pos, 1))}
-    early_stop = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
+    early_stop = tf.keras.callbacks.EarlyStopping(monitor="val_auc", mode="max", patience=5, restore_best_weights=True)
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-6)
+
+    aug_ds = (
+        tf.data.Dataset.from_tensor_slices((X_train_cnn, y_train))
+        .shuffle(len(X_train_cnn), seed=seed)
+        .batch(args.batch_size)
+        .map(
+            lambda imgs, lbls: (
+                tf.image.random_flip_up_down(tf.image.random_flip_left_right(imgs)),
+                lbls,
+            ),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+        .prefetch(tf.data.AUTOTUNE)
+    )
 
     model.fit(
-        X_train_cnn, y_train,
+        aug_ds,
         validation_data=(X_val_cnn, y_val),
-        epochs=args.epochs,
-        batch_size=args.batch_size,
+        epochs=max(args.epochs, 15),
         class_weight=class_weight,
-        callbacks=[early_stop],
+        callbacks=[early_stop, reduce_lr],
         verbose=1,
     )
     model.save(output_dir / "mobilenetv2_ham10000.keras")
@@ -340,7 +363,7 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
             if hm.max() > 0.0:
                 hm = hm / hm.max()
             p_val = float(np.clip(pred[0, 0].numpy(), 0.0, 1.0))
-            bio = extract_abcd_biomarkers(prep, p_val, hm, config)
+            bio = extract_abcd_biomarkers(prep.clean_rgb, prep.lesion_mask, prep.boundary_ring, p_val, hm, config)
             probs.append(p_val)
             heatmaps.append(hm)
             bios.append(bio)
