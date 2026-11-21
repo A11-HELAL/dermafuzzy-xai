@@ -123,8 +123,8 @@ def compute_verified_confidence(
     f_p_cnn = _validate_unit_interval_float(p_cnn, "p_cnn")
     f_alpha = _validate_unit_interval_float(alpha, "alpha")
 
-    # Smooth Hermite S-Curve Adaptive Saliency Trust Gate (tau_low=0.10, tau_high=0.38)
-    t = float(np.clip((f_alpha - 0.10) / (0.38 - 0.10), 0.0, 1.0))
-    trust_gate = t * t * (3.0 - 2.0 * t)
+    # Concave Square-Root Saliency Trust Gate (tau_sat=0.25):
+    # Strictly suppresses zero-overlap ruler artifacts (alpha=0 -> 0.0) without zeroing small real lesions.
+    trust_gate = min(1.0, math.sqrt(f_alpha / 0.25))
     d_verified = f_p_cnn * trust_gate
     return float(np.clip(d_verified, 0.0, 1.0))
