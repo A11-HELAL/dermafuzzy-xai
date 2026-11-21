@@ -225,7 +225,7 @@ def run_synthetic_dry_run(output_dir: Path, config: DermaConfig) -> None:
 
 
 def run_full_colab_pipeline(args: argparse.Namespace) -> None:
-    """Execute Q1-grade 5-stage HAM10000 MobileNetV2 training, 4-Way TTA Grad-CAM, and ablation pipeline."""
+    """Execute Q1-grade 5-stage HAM10000 MobileNetV2 training, pre-sigmoid batched Grad-CAM, and ablation pipeline."""
     config = load_config()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -245,7 +245,7 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     from dermafuzzy_core.preprocessing import preprocess_image
 
     print("=" * 70)
-    print("DERMAFUZZY-XAI Q1 HAM10000 TRAINING & XAI PIPELINE (TWO-STAGE + 4-WAY TTA)")
+    print("DERMAFUZZY-XAI Q1 HAM10000 PIPELINE (CLEAN LOGIT GRAD-CAM + 4-WAY TTA)")
     print("=" * 70)
     print(f"TensorFlow: {tf.__version__} | GPUs: {len(tf.config.list_physical_devices('GPU'))}")
 
@@ -273,7 +273,9 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     raw_test_df = df_all.iloc[test_idx].reset_index(drop=True)
 
     test_mel = raw_test_df[raw_test_df["label"] == 1]
-    test_nv = raw_test_df[raw_test_df["label"] == 0].sample(n=min(len(test_mel), len(raw_test_df[raw_test_df["label"] == 0])), random_state=seed)
+    test_nv = raw_test_df[raw_test_df["label"] == 0].sample(
+        n=min(len(test_mel), len(raw_test_df[raw_test_df["label"] == 0])), random_state=seed
+    )
     test_df = pd.concat([test_mel, test_nv], ignore_index=True).sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
     tv_groups = trainval_df["lesion_id"] if "lesion_id" in trainval_df.columns else trainval_df["image_id"]
@@ -307,31 +309,31 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     X_val_cnn = tf.keras.applications.mobilenet_v2.preprocess_input(X_val_raw.copy())
     X_test_cnn = tf.keras.applications.mobilenet_v2.preprocess_input(X_test_raw.copy())
 
-    # [STAGE 3/5] Two-Stage MobileNetV2 Transfer Learning & 4-Way TTA Grad-CAM ('out_relu')
-    print("\n[STAGE 3/5] Two-Stage Fine-Tuning MobileNetV2 (Stage 3a Head Warmup -> Stage 3b Backbone)...")
+    # [STAGE 3/5] Two-Stage MobileNetV2 with Clean Linear Logit Head (Zero BN Shock & Exact CAM/Grad-CAM)
+    print("\n[STAGE 3/5] Two-Stage Fine-Tuning MobileNetV2 (Clean Logit Head)...")
     h, w = config.dataset.image_size[1], config.dataset.image_size[0]
     base_model = tf.keras.applications.MobileNetV2(weights="imagenet", include_top=False, input_shape=(h, w, 3))
     base_model.trainable = False
 
     x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(0.45)(x)
-    x = tf.keras.layers.Dense(128, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
-    x = tf.keras.layers.Dropout(0.30)(x)
-    out = tf.keras.layers.Dense(1, activation="sigmoid", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+    x = tf.keras.layers.Dropout(0.35)(x)
+    logits = tf.keras.layers.Dense(
+        1, activation=None, kernel_regularizer=tf.keras.regularizers.l2(1e-4), name="logits"
+    )(x)
+    out = tf.keras.layers.Activation("sigmoid", name="probs")(logits)
     model = tf.keras.Model(inputs=base_model.input, outputs=out)
 
     n_neg, n_pos = int((y_train == 0).sum()), int((y_train == 1).sum())
     class_weight = {0: len(y_train) / (2.0 * max(n_neg, 1)), 1: len(y_train) / (2.0 * max(n_pos, 1))}
-    loss_fn = tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05)
+    loss_fn = tf.keras.losses.BinaryCrossentropy()
 
     def _augment(imgs, lbls):
         imgs = tf.image.random_flip_left_right(imgs)
         imgs = tf.image.random_flip_up_down(imgs)
         k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
         imgs = tf.image.rot90(imgs, k=k)
-        imgs = tf.image.random_brightness(imgs, max_delta=0.10)
-        imgs = tf.image.random_contrast(imgs, lower=0.90, upper=1.10)
+        imgs = tf.image.random_brightness(imgs, max_delta=0.08)
+        imgs = tf.image.random_contrast(imgs, lower=0.92, upper=1.08)
         imgs = tf.clip_by_value(imgs, -1.0, 1.0)
         return imgs, lbls
 
@@ -351,16 +353,16 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     )
     model.fit(aug_ds, validation_data=(X_val_cnn, y_val), epochs=5, class_weight=class_weight, verbose=1)
 
-    # Stage 3b: Unfreeze Top 55 Layers (Keep all BatchNormalization frozen)
+    # Stage 3b: Fine-tune top 45 layers (Keep ALL BatchNormalization frozen)
     base_model.trainable = True
-    for layer in base_model.layers[:-55]:
+    for layer in base_model.layers[:-45]:
         layer.trainable = False
     for layer in base_model.layers:
         if isinstance(layer, tf.keras.layers.BatchNormalization):
             layer.trainable = False
 
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1.5e-4),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
         loss=loss_fn,
         metrics=["accuracy", tf.keras.metrics.AUC(name="auc")],
     )
@@ -377,56 +379,78 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
     )
     model.save(output_dir / "mobilenetv2_ham10000.keras")
 
-    grad_model = tf.keras.Model(inputs=model.input, outputs=[model.get_layer("out_relu").output, model.output])
+    # Fast Batched @tf.function Pre-Sigmoid Logit Grad-CAM (Zero Sigmoid Saturation & Zero Dead Heatmaps)
+    grad_model = tf.keras.Model(
+        inputs=model.input,
+        outputs=[
+            model.get_layer("out_relu").output,
+            model.get_layer("logits").output,
+            model.output,
+        ],
+    )
+
+    @tf.function
+    def _gradcam_batch_step(batch_t):
+        with tf.GradientTape() as tape:
+            conv_out, logit_out, prob_out = grad_model(batch_t, training=False)
+            target = logit_out[:, 0]
+        grads = tape.gradient(target, conv_out)
+        pooled = tf.reduce_mean(grads, axis=(1, 2), keepdims=True)
+        cam_pos = tf.nn.relu(tf.reduce_sum(conv_out * pooled, axis=-1))
+        cam_abs = tf.reduce_sum(conv_out * tf.abs(pooled), axis=-1)
+        max_pos = tf.reduce_max(cam_pos, axis=(1, 2), keepdims=True)
+        cam = tf.where(max_pos > 1e-8, cam_pos, cam_abs)
+        cam_max = tf.reduce_max(cam, axis=(1, 2), keepdims=True)
+        cam = tf.where(cam_max > 1e-8, cam / cam_max, tf.zeros_like(cam))
+        return prob_out[:, 0], cam
+
+    def _run_batched_gradcam(X_arr, batch_size: int = 32):
+        all_p, all_hm = [], []
+        for start in range(0, len(X_arr), batch_size):
+            bt = tf.convert_to_tensor(X_arr[start : start + batch_size])
+            p_b, hm_b = _gradcam_batch_step(bt)
+            all_p.append(p_b.numpy())
+            all_hm.append(hm_b.numpy())
+        return np.concatenate(all_p, axis=0), np.concatenate(all_hm, axis=0)
 
     def _extract_split_biomarkers(preps, X_cnn, use_tta: bool = False):
-        probs, heatmaps, bios = [], [], []
-        for idx, prep in enumerate(preps):
-            img_orig = X_cnn[idx : idx + 1]
-            def _single_gradcam(arr):
-                img_t = tf.convert_to_tensor(arr)
-                with tf.GradientTape() as tape:
-                    conv_out, pred = grad_model(img_t, training=False)
-                    loss = pred[:, 0]
-                grads = tape.gradient(loss, conv_out)
-                pooled = tf.reduce_mean(grads, axis=(1, 2))[0].numpy()
-                hm_local = np.sum(conv_out[0].numpy() * pooled, axis=-1)
-                hm_local = np.maximum(hm_local, 0.0)
-                if hm_local.max() > 0.0:
-                    hm_local = hm_local / hm_local.max()
-                return float(np.clip(pred[0, 0].numpy(), 0.0, 1.0)), hm_local
+        p0, hm0 = _run_batched_gradcam(X_cnn, batch_size=args.batch_size)
+        if use_tta:
+            p1, hm1 = _run_batched_gradcam(X_cnn[:, :, ::-1, :].copy(), batch_size=args.batch_size)
+            p2, hm2 = _run_batched_gradcam(X_cnn[:, ::-1, :, :].copy(), batch_size=args.batch_size)
+            p3, hm3 = _run_batched_gradcam(X_cnn[:, ::-1, ::-1, :].copy(), batch_size=args.batch_size)
+            probs = 0.25 * (p0 + p1 + p2 + p3)
+            hms = 0.25 * (hm0 + hm1[:, :, ::-1] + hm2[:, ::-1, :] + hm3[:, ::-1, ::-1])
+            hm_max = np.max(hms, axis=(1, 2), keepdims=True)
+            hms = np.where(hm_max > 1e-8, hms / np.maximum(hm_max, 1e-8), 0.0)
+        else:
+            probs, hms = p0, hm0
 
-            p0, hm0 = _single_gradcam(img_orig)
-            if use_tta:
-                p1, hm1 = _single_gradcam(img_orig[:, :, ::-1, :].copy())
-                p2, hm2 = _single_gradcam(img_orig[:, ::-1, :, :].copy())
-                p3, hm3 = _single_gradcam(img_orig[:, ::-1, ::-1, :].copy())
-                p_val = 0.25 * (p0 + p1 + p2 + p3)
-                hm = 0.25 * (hm0 + hm1[:, ::-1] + hm2[::-1, :] + hm3[::-1, ::-1])
-                if hm.max() > 0.0:
-                    hm = hm / hm.max()
-            else:
-                p_val, hm = p0, hm0
-
-            bio = extract_abcd_biomarkers(
+        probs = np.clip(probs.astype(np.float64), 0.0, 1.0)
+        bios = [
+            extract_abcd_biomarkers(
                 clean_rgb=prep.clean_rgb,
                 mask=prep.lesion_mask,
                 boundary_ring=prep.boundary_ring,
                 config=config,
-                p_cnn=p_val,
-                heatmap=hm,
+                p_cnn=float(probs[idx]),
+                heatmap=hms[idx],
             )
-            probs.append(p_val)
-            heatmaps.append(hm)
-            bios.append(bio)
-        return np.asarray(probs, dtype=np.float64), heatmaps, bios
+            for idx, prep in enumerate(preps)
+        ]
+        return probs, list(hms), bios
 
-    print("\nExtracting 4-Way TTA Grad-CAM heatmaps & Room 3 ABCD Biomarkers...")
+    print("\nExtracting Batched Pre-Sigmoid 4-Way TTA Grad-CAM & Room 3 ABCD Biomarkers...")
     _, _, train_bios = _extract_split_biomarkers(train_preps, X_train_cnn, use_tta=False)
     p_test_raw, test_heatmaps, test_bios = _extract_split_biomarkers(test_preps, X_test_cnn, use_tta=True)
 
     fb_rate = 100.0 * sum(1 for p in test_preps if p.fallback_used) / max(len(test_preps), 1)
-    print(f"\n[DIAGNOSTIC TELEMETRY] Test Fallback Mask Rate: {fb_rate:.1f}% | Mean alpha: {np.mean([b.alpha for b in test_bios]):.3f}")
+    zero_alpha_rate = 100.0 * sum(1 for b in test_bios if b.alpha <= 1e-6) / max(len(test_bios), 1)
+    print(
+        f"\n[DIAGNOSTIC TELEMETRY] Fallback Mask Rate: {fb_rate:.1f}% | "
+        f"Mean alpha: {np.mean([b.alpha for b in test_bios]):.3f} | "
+        f"Zero-Heatmap Rate: {zero_alpha_rate:.1f}%"
+    )
     for feat_name, vals in [
         ("A (Asymmetry)", [b.A for b in test_bios]),
         ("B_geo", [b.B_geo for b in test_bios]),
