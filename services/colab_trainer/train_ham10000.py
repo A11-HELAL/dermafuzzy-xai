@@ -464,10 +464,10 @@ def run_full_colab_pipeline(args: argparse.Namespace) -> None:
         print(f"  Feature AUC-ROC | {feat_name:15s}: {f_auc:.4f}")
 
     # [STAGE 4/5] Leak-Free Mamdani FIS Calibration on Train Split Only
-    print(f"\n[STAGE 4/5] Calibrating Mamdani FIS Percentiles on Train Split (N={len(train_bios)})...")
     pos_idx = [i for i, lbl in enumerate(y_train) if lbl == 1]
     neg_idx = [i for i, lbl in enumerate(y_train) if lbl == 0][: len(pos_idx)]
     bal_train_idx = pos_idx + neg_idx
+    print(f"\n[STAGE 4/5] Calibrating Mamdani FIS Percentiles on 1:1 Balanced Train Subset (N={len(bal_train_idx)} from {len(train_bios)} train)...")
     train_matrix = np.asarray([train_bios[i].as_vector() for i in bal_train_idx], dtype=np.float64)
     calibration = calibrate_fis_percentiles(train_matrix, config)
     save_calibration_json(calibration, output_dir / "fis_calibration.json")

@@ -10,6 +10,7 @@ dataset:
   target_classes:
     malignant: "mel"
     benign: "nv"
+  # Dry-run defaults; full HAM10000 trainer uses all mel + 2x nv via nested 5-fold StratifiedGroupKFold(lesion_id)
   samples_per_class: 1000
   random_state: 42
   split_ratios:

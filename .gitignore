@@ -13,3 +13,6 @@ Thumbs.db
 *.pkl
 *.pickle
 LIVE_STATE_SNAPSHOT.md
+*.keras
+*.h5
+*.weights.h5

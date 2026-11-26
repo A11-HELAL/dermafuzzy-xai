@@ -1,6 +1,6 @@
 # DermaFuzzy-XAI
 
-[![CI](https://github.com/dermafuzzy-xai/dermafuzzy-xai/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
+[![CI](https://github.com/A11-HELAL/dermafuzzy-xai/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
 [![Python 3.12 | 3.14](https://img.shields.io/badge/Python-3.12%20%7C%203.14-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Constitution Principle I](https://img.shields.io/badge/Pure%20Core-Zero%20ML%20Skew-brightgreen.svg)](#engineering-constitution--guarantees)
@@ -14,7 +14,7 @@
 
 Deep convolutional neural networks (such as MobileNetV2) achieve high sensitivity for melanoma detection on curated dermatoscopic benchmarks. However, in real-world clinical practice, black-box CNNs are notoriously susceptible to **spurious peripheral artifacts**—such as dermoscopic ruler markings, gel air bubbles, surgical ink, and skin folds. When a deep model attends to off-lesion artifacts rather than melanocytic atypia, it yields catastrophic false positives, driving unnecessary invasive biopsies and undermining clinician trust.
 
-**DermaFuzzy-XAI** resolves this critical safety barrier by coupling classical dermatological **ABCD criteria** (Asymmetry, Border irregularity, Color variegation, and Diameter) with **saliency-gated attention verification** ($D_{verified} = p_{cnn} \cdot \alpha$) inside an auditable, data-calibrated **Mamdani Fuzzy Inference System (FIS)**. If a deep network's high confidence is driven by a peripheral ruler marking, the spatial overlap $\alpha$ approaches zero, suppressing $D_{verified}$ and activating the clinical **Saliency Veto Rule ($R_5$)**, safely classifying the lesion as benign.
+**DermaFuzzy-XAI** resolves this critical safety barrier by coupling classical dermatological **ABCD criteria** (Asymmetry, Border irregularity, Color variegation, and Deep verified confidence) with a **Concave Square-Root Saliency Trust Gate** ($g(\alpha) = \min(1.0, \sqrt{\alpha / 0.25})$, $D_{verified} = \text{clip}(p_{cnn} \cdot g(\alpha), 0, 1)$) inside an auditable, data-calibrated **Mamdani Fuzzy Inference System (FIS)**. If a deep network's high confidence is driven by a peripheral ruler marking, the spatial overlap $\alpha$ approaches zero, suppressing $D_{verified}$ and activating the clinical **Saliency Veto Rule ($R_5$)**, safely classifying the lesion as benign.
 
 ---
 
@@ -39,16 +39,16 @@ flowchart TD
         seg --> asym["Asymmetry Index A (Major/Minor Invariant)"]
         ring --> b_geo["Geometric Boundary Jaggedness B_geo"]
         ring --> b_grad["Perilesional Radial Gradient Fuzziness B_grad"]
-        clahe --> color["Color Variegation C (HSV/LAB Dispersion)"]
+        clahe --> color["Color Variegation C ({L,a,b,S,V} Dispersion)"]
         cam["CNN Grad-CAM Heatmap"] --> overlap["Attention Overlap α with Lesion Mask"]
-        overlap --> d_ver["Saliency-Gated Confidence: D_verified = p_cnn · α"]
+        overlap --> d_ver["Saliency Trust Gate: g(α) = min(1.0, √(α/0.25))\nD_verified = clip(p_cnn · g(α), 0, 1)"]
     end
 
     subgraph Room4["Room 4: Mamdani FIS Engine"]
-        cuts["Calibrated Training Percentiles\n(JSON-Serialized, Zero Pickle)"]
+        cuts["Calibrated Training Percentiles (N=1,448)\n(JSON-Serialized, Zero Pickle)"]
         memberships["Partition-of-Unity Fuzzy Memberships\n(Low, Medium, High)"]
         rules["5 Expert Clinical Rules (R1–R5)\nMamdani Min-Max Inference"]
-        centroid["Monotonic Centroid Defuzzification\nContinuous Risk % [0, 100]"]
+        centroid["Monotonic Centroid Blend (0.22 C_raw + 0.78 S_mapped)\nContinuous Risk % [0, 100]"]
     end
 
     subgraph Room5["Room 5: Evaluation & Visualizer"]
@@ -80,19 +80,19 @@ flowchart TD
 2. **Room 2: Deterministic OpenCV Preprocessing (`dermafuzzy_core.preprocessing`)**:
    - Morphological Black-Hat filter with Telea inpainting (`remove_hair`) preserving dermatoscopic structures.
    - Chromatic-preserving lightness contrast enhancement in LAB color space (`apply_lab_clahe`).
-   - Otsu adaptive thresholding with convex-hull fallback and morphological perilesional boundary ring dilation ($R_{edge}$).
+   - Otsu adaptive thresholding with centered elliptical fallback (`axes = (0.35W, 0.35H)` when area ratio outside `[0.02, 0.90]`) and morphological perilesional boundary ring dilation ($R_{edge}$).
    - Read-only array protection (`arr.flags.writeable = False`).
 
 3. **Room 3: ABCD Biomarkers & Grad-CAM Attention Gating (`dermafuzzy_core.biomarkers`, `dermafuzzy_core.gradcam`)**:
-   - **Asymmetry ($A \in [0.0, 1.0]$)**: Principal inertia axis alignment with orthogonal bi-axial XOR reflection overlap ($\Delta A \le 0.03$ under arbitrary rotation).
+   - **Asymmetry ($A \in [0.0, 1.0]$)**: Principal inertia axis alignment with orthogonal bi-axial XOR reflection overlap.
    - **Border Fuzziness ($B_{fuzzy} \in [0.0, 1.0]$)**: Convex combination $\beta B_{geo} + (1-\beta) B_{grad}$ coupling isoperimetric contour quotient with radial Sobel gradient transition variance.
-   - **Color Variegation ($C \in [0.0, 1.0]$)**: Covariance-weighted Euclidean distance across standard dermoscopic color clusters in HSV/LAB.
-   - **Saliency Gating ($D_{verified} = p_{cnn} \cdot \alpha$)**: Normalized spatial intersection-over-lesion $\alpha = \frac{\sum_{i,j} L_{i,j} M_{i,j}}{\sum_{i,j} L_{i,j} + \epsilon}$ penalizing off-lesion attention.
+   - **Color Variegation ($C \in [0.0, 1.0]$)**: Multi-channel dispersion across 5 normalized channels $\{L, a, b, S, V\}$ strictly inside lesion mask $M > 0$: $C = \text{clip}(1.35 \cdot \text{mean}(\text{std} + 0.5 \cdot (P_{90} - P_{10})), 0, 1)$.
+   - **Saliency Gating ($D_{verified}$)**: Concave Square-Root Saliency Trust Gate $g(\alpha) = \min(1.0, \sqrt{\alpha / 0.25})$ and $D_{verified} = \text{clip}(p_{cnn} \cdot g(\alpha), 0, 1)$ using normalized spatial overlap $\alpha = \frac{\sum_{i,j} H_{i,j} M_{i,j}}{\sum_{i,j} H_{i,j} + \epsilon}$ to suppress off-lesion artifacts.
 
 4. **Room 4: Data-Calibrated Mamdani FIS (`dermafuzzy_core.fis_engine`)**:
-   - Data-driven quartile calibration ($P_{25}, P_{50}, P_{75}$) persisted strictly via human-readable JSON (`artifacts/fis_calibration.json`) with degenerate separation guards ($\Delta \ge 1e-4$). Zero `pickle`.
+   - Data-driven quartile calibration ($P_{25}, P_{50}, P_{75}$) on a 1:1 balanced train-only split ($N = 1,448$) persisted strictly via human-readable JSON (`artifacts/fis_calibration.json`) with degenerate separation guards ($\Delta \ge 1e-4$). Zero `pickle`.
    - Partition-of-Unity membership functions ($\sum \mu_k(x) = 1.0$).
-   - 5 clinical Mamdani rules ($R_1$–$R_5$) with strictly monotonic centroid defuzzification.
+   - 5 clinical Mamdani rules ($R_1$–$R_5$) with monotonic centroid blend $R = \text{clip}(0.22 \cdot C_{raw} + 0.78 \cdot S_{mapped}, 0, 100)$ using clinical evidence weights `{A: 0.12, B_fuzzy: 0.12, C: 0.12, D_verified: 0.64}`.
 
 5. **Room 5: Clinical Evaluation & 4-Panel XAI Visualizer (`dermafuzzy_core.evaluation`, `dermafuzzy_core.visualizer`)**:
    - Pure NumPy clinical metrics ($TP, TN, FP, FN$, Sensitivity, Specificity, Precision, Accuracy, F1-Score) and exact tied-score trapezoidal AUC-ROC matching Mann-Whitney U fractional ranks within $1e-6$.
@@ -101,25 +101,28 @@ flowchart TD
 
 6. **Room 6: Metamorphic QA Gate (`tests/metamorphic/test_metamorphic.py`)**:
    - Formal software verification enforcing 5 clinical Metamorphic Relations:
-     - **MR1**: Strict rotation invariance under $0^\circ, 30^\circ, 45^\circ, 90^\circ, 135^\circ$ ($|\Delta A| \le 0.03$).
-     - **MR2**: Immunity to peripheral ruler/gel artifacts (specificity preserved).
+     - **MR1**: Strict rotation invariance under $0^\circ, 90^\circ, 180^\circ, 270^\circ$ ($|\Delta R| \le 2.0\%$ and zero risk category flip).
+     - **MR2**: Immunity to peripheral ruler/gel artifacts (specificity preserved via Rule 5 veto).
      - **MR3**: Monotonic risk increase under increasing biomarker severity ($\Delta \ge 0.0$).
      - **MR4**: Partition completeness across the continuous biomarker hypercube.
      - **MR5**: Deterministic calibration JSON round-trip invariance.
 
 ---
 
-## 3-Tier Comparative Ablation Study
+## 3-Tier Comparative Ablation Study (HAM10000 Held-Out Test Cohort, $N = 446$)
 
-Evaluated across synthetic benchmark cohorts corrupted by dermoscopic ruler markings (where black-box CNNs produce false alarms):
+Evaluated on the unseen, lesion-ID grouped balanced HAM10000 test cohort ($N = 446$, commit `e2ac0e9`, calibrated strictly on the 1:1 balanced train split $N = 1,448$):
 
-| Architecture Tier | Accuracy | Sensitivity | Specificity | Precision | F1-Score | AUC-ROC | Failure Mode / Clinical Vulnerability |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|---|
-| **Tier 1: Pure MobileNetV2 Black-Box** | 75.0% | 100.0% | 50.0% | 66.7% | 80.0% | 0.8594 | High false alarm rate on non-lesional ruler markings and skin folds. |
-| **Tier 2: Crisp ABCD Fixed Thresholds** | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% | 1.0000 | Hard step-cutoffs ($P_{50}$) suffer boundary instability on borderline lesions. |
-| **Tier 3: Proposed DermaFuzzy-XAI** | **100.0%** | **100.0%** | **100.0%** | **100.0%** | **100.0%** | **1.0000** | **Robust attention gating suppresses artifacts via Rule 5; smooth fuzzy ramps.** |
+| Architecture Tier | Accuracy | Sensitivity | Specificity | Precision | F1-Score | AUC-ROC |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Tier 1: Pure MobileNetV2 Black-Box** | 78.0% | 73.5% | 82.5% | 80.8% | 77.0% | 0.8908 |
+| **Tier 2: Crisp ABCD Fixed Thresholds** | 72.2% | 85.7% | 58.7% | 67.5% | 75.5% | 0.7825 |
+| **Tier 3: Proposed DermaFuzzy-XAI** | **77.6%** | **72.6%** | **82.5%** | **80.6%** | **76.4%** | **0.8617** |
 
-*Quantitative takeaway*: DermaFuzzy-XAI achieves a **+50.0% gain in Specificity** over the Pure MobileNetV2 black-box on artifact-corrupted cohorts while maintaining 100% sensitivity for malignant melanoma.
+### Clinical Takeaways & Diagnostic Telemetry ($N = 446$)
+- **+23.8% Specificity Gain** over Crisp ABCD Fixed Thresholds (`82.5%` vs `58.7%`) while retaining **96.7%** of raw black-box CNN AUC-ROC (`0.8617` vs `0.8908`) with full clinical rule explainability.
+- **Segmentation & Saliency Telemetry**: **99.8%** valid Otsu retention (`0.2%` elliptical fallback rate), mean Grad-CAM attention overlap $\alpha = 0.413$, and **0.4%** zero-heatmap rate.
+- **Standalone Feature AUC-ROC**: `P_CNN = 0.8908`, `D_verified = 0.8609`, `A = 0.6705`, `B_fuzzy = 0.6571`, `B_geo = 0.6261`, `C = 0.5884`, `B_grad = 0.5037`.
 
 ---
 
@@ -129,8 +132,12 @@ Every diagnostic inference generates an auditable, high-resolution (300 DPI) 4-p
 
 1. **Panel 1: Lesion Segmentation Mask**: Original preprocessed RGB image overlaid with the emerald green contour of the primary lesion mask, annotated with Asymmetry $A$ and Color Variegation $C$.
 2. **Panel 2: Boundary Fuzziness**: Perilesional boundary ring ($R_{edge}$) highlighted in cyan, displaying geometric jaggedness $B_{geo}$, gradient fuzziness $B_{grad}$, and total $B_{fuzzy}$.
-3. **Panel 3: Attention Verification**: Blended JET-colormapped Grad-CAM attention heatmap, displaying spatial overlap $\alpha$ and verified confidence $D_{verified} = p_{cnn} \cdot \alpha$.
+3. **Panel 3: Attention Verification**: Blended JET-colormapped Grad-CAM attention heatmap, displaying spatial overlap $\alpha$ and verified confidence $D_{verified} = \text{clip}(p_{cnn} \cdot g(\alpha), 0, 1)$ where $g(\alpha) = \min(1.0, \sqrt{\alpha / 0.25})$.
 4. **Panel 4: Mamdani Rule Firings & Clinical Decision**: Horizontal bar chart of rule firings $R_1$–$R_5$ with the dominant rule highlighted, vertical decision line at continuous Centroid Risk %, and a color-coded clinical decision banner (`Low: Green`, `Medium: Amber`, `High: Crimson`).
+
+![4-Panel Clinical XAI Report](artifacts/sample_4panel_xai.png)
+
+*(Note: Trained MobileNetV2 weight binaries `*.keras`, `*.h5`, and `*.weights.h5` are excluded from Git version history via `.gitignore`.)*
 
 ---
 
@@ -142,7 +149,7 @@ Every diagnostic inference generates an auditable, high-resolution (300 DPI) 4-p
 
 ```bash
 # Clone repository
-git clone https://github.com/dermafuzzy-xai/dermafuzzy-xai.git
+git clone https://github.com/A11-HELAL/dermafuzzy-xai.git
 cd dermafuzzy-xai
 
 # Install package in editable mode with development tools
@@ -194,7 +201,7 @@ All core mathematical, segmentation, fuzzy inference, evaluation, and visualizat
 | **Package Meta** | `__version__` | Core library semver string (`0.1.0`). |
 | **Room 1: Config** | `DermaConfig`, `DatasetConfig`, `PreprocessingConfig`, `BiomarkersConfig`, `MamdaniFISConfig`, `load_config`, `validate_config` | Slotted immutable domain dataclasses with `MappingProxyType` deep immutability and YAML loader. |
 | **Room 2: Preprocessing** | `PreprocessingResult`, `preprocess_image`, `remove_hair`, `apply_lab_clahe`, `extract_lesion_mask_and_ring` | OpenCV DullRazor inpainting, CIE-LAB L CLAHE, and boundary ring extraction (`arr.flags.writeable = False`). |
-| **Room 3: ABCD Biomarkers & Grad-CAM** | `BiomarkerResult`, `compute_asymmetry`, `compute_border_fuzziness`, `compute_color_variation`, `extract_abcd_biomarkers`, `compute_attention_overlap`, `compute_verified_confidence` | Normalized clinical biomarkers in $[0.0, 1.0]$ and saliency-verified deep confidence gating ($D_{verified} = p_{cnn} \cdot \alpha$). |
+| **Room 3: ABCD Biomarkers & Grad-CAM** | `BiomarkerResult`, `compute_asymmetry`, `compute_border_fuzziness`, `compute_color_variation`, `extract_abcd_biomarkers`, `compute_attention_overlap`, `compute_verified_confidence` | Normalized clinical biomarkers in $[0.0, 1.0]$ and saliency-verified deep confidence gating ($D_{verified} = \text{clip}(p_{cnn} \cdot g(\alpha), 0, 1)$). |
 | **Room 4: Mamdani FIS Engine** | `FISCalibration`, `FuzzyMembershipSet`, `ClinicalRule`, `FISPrediction`, `CLINICAL_RULES`, `calibrate_fis_percentiles`, `save_calibration_json`, `load_calibration_json`, `compute_memberships`, `evaluate_mamdani_fis`, `diagnose_image` | Data-driven quartile calibration (JSON-persisted), Partition-of-Unity membership evaluation, 5-rule inference, and end-to-end diagnosis. |
 | **Room 5: Evaluation & Visualizer** | `ClinicalMetrics`, `AblationReport`, `compute_clinical_metrics`, `evaluate_crisp_abcd_baseline`, `run_ablation_study`, `FourPanelReportConfig`, `render_four_panel_report` | Pure NumPy biostatistical metrics, tied-score trapezoidal AUC-ROC, 3-tier comparative ablation study, and 300 DPI headless visualizer. |
 
