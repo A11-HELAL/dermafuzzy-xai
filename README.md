@@ -4,7 +4,7 @@
 [![Python 3.12 | 3.14](https://img.shields.io/badge/Python-3.12%20%7C%203.14-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Constitution Principle I](https://img.shields.io/badge/Pure%20Core-Zero%20ML%20Skew-brightgreen.svg)](#engineering-constitution--guarantees)
-[![Tests Passing](https://img.shields.io/badge/Tests-210%20Passing-success.svg)](tests/)
+[![Tests Passing](https://img.shields.io/badge/Tests-290%20Passing-success.svg)](tests/)
 
 **Explainable Melanoma Diagnosis via Fuzzy Border Uncertainty and Attention-Verified Deep Biomarkers.**
 
@@ -109,6 +109,26 @@ flowchart TD
 
 ---
 
+## 5-Fold Lesion-Grouped Cross-Validation ($N = 3,339$: 1,113 mel / 2,226 nv)
+
+Evaluated across all 5 outer splits of `StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)` grouped strictly by `lesion_id` with zero lesion leakage and train-only 1:1 balanced FIS calibration (`artifacts/cv_5fold/cv_report.md`):
+
+### Full Unseen Cohort (`N = 3,339`: 1,113 mel, 2,226 nv) — Mean ± SD Across 5 Folds
+
+| Architecture Tier | Accuracy | Sensitivity | Specificity | Precision | F1-Score | ROC-AUC | PR-AUC |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Tier 1: MobileNetV2 (`p >= 0.50`)** | 82.2% ± 1.5% | 81.2% ± 7.5% | 82.5% ± 4.6% | 70.3% ± 3.1% | 75.1% ± 2.8% | 0.9125 ± 0.0078 | 0.8487 ± 0.0187 |
+| **Tier 2: Crisp ABCD (`p >= 0.50`)** | 69.1% ± 1.0% | 88.0% ± 4.0% | 59.7% ± 3.2% | 52.2% ± 1.9% | 65.5% ± 1.2% | 0.8100 ± 0.0163 | 0.6203 ± 0.0184 |
+| **Tier 3 Standard: DermaFuzzy-XAI (`R >= 50%`)** | **82.0% ± 1.6%** | **78.3% ± 4.6%** | **83.9% ± 3.2%** | **71.0% ± 2.8%** | **74.3% ± 1.8%** | **0.8937 ± 0.0123** | **0.8106 ± 0.0247** |
+| **Tier 3 Clinical Triage: DermaFuzzy-XAI (`R >= 35%`)** | **73.3% ± 2.4%** | **94.3% ± 3.0%** | **62.7% ± 5.1%** | **55.9% ± 2.6%** | **70.2% ± 2.0%** | **0.8937 ± 0.0123** | **0.8106 ± 0.0247** |
+
+### Cross-Validation Highlights
+- **97.9% Discriminative Retention with Explainability**: Tier 3 Standard retains **97.9%** of raw black-box MobileNetV2 ROC-AUC (`0.8937 ± 0.0123` vs `0.9125 ± 0.0078`) while delivering higher mean specificity (`83.9% ± 3.2%` vs `82.5% ± 4.6%`) and higher precision (`71.0% ± 2.8%` vs `70.3% ± 3.1%`).
+- **Statistical Equivalence at Operating Cutoff & Superiority over Crisp Rules**: On pooled OOF predictions (`N = 3,339`), Tier 3 Standard (`R >= 50%`) shows no statistically significant accuracy difference vs. MobileNetV2 (exact McNemar `p = 0.705`) while decisively outperforming Crisp ABCD (`ΔROC-AUC = +0.0842`, DeLong `z = 17.356`, `p = 1.78e-67`, McNemar `p = 2.24e-59`).
+- **Clinical Triage Operating Mode (`R >= 35%`)**: Lowering the triage cutoff achieves **94.3% ± 3.0%** melanoma sensitivity at **62.7% ± 5.1%** benign specificity (`78.3%` Acc / `94.3%` Sens / `62.3%` Spec on the `1:1` balanced cohort `N = 2,226`).
+
+---
+
 ## 3-Tier Comparative Ablation Study (HAM10000 Held-Out Test Cohort, $N = 446$)
 
 Evaluated on the unseen, lesion-ID grouped balanced HAM10000 test cohort ($N = 446$, commit `e2ac0e9`, calibrated strictly on the 1:1 balanced train split $N = 1,448$):
@@ -120,9 +140,27 @@ Evaluated on the unseen, lesion-ID grouped balanced HAM10000 test cohort ($N = 4
 | **Tier 3: Proposed DermaFuzzy-XAI** | **77.6%** | **72.6%** | **82.5%** | **80.6%** | **76.4%** | **0.8617** |
 
 ### Clinical Takeaways & Diagnostic Telemetry ($N = 446$)
-- **+23.8% Specificity Gain** over Crisp ABCD Fixed Thresholds (`82.5%` vs `58.7%`) while retaining **96.7%** of raw black-box CNN AUC-ROC (`0.8617` vs `0.8908`) with full clinical rule explainability.
+- **+23.8% Specificity Gain** over Crisp ABCD Fixed Thresholds (`82.5%` vs `58.7%`, `[17.9%, 30.0%]`, McNemar `p = 0.0160`) while retaining **96.7%** of raw black-box CNN AUC-ROC (`0.8617` vs `0.8908`) with full clinical rule explainability.
 - **Segmentation & Saliency Telemetry**: **99.8%** valid Otsu retention (`0.2%` elliptical fallback rate), mean Grad-CAM attention overlap $\alpha = 0.413$, and **0.4%** zero-heatmap rate.
 - **Standalone Feature AUC-ROC**: `P_CNN = 0.8908`, `D_verified = 0.8609`, `A = 0.6705`, `B_fuzzy = 0.6571`, `B_geo = 0.6261`, `C = 0.5884`, `B_grad = 0.5037`.
+
+---
+
+## Empirical Artifact Resilience & Component Ablation ($N = 446 \times 4$ Conditions)
+
+Stress-tested across 4 controlled peripheral artifact conditions (`clean`, `ruler`, `ink`, `gel`) with 2,000 stratified bootstrap replicates and paired DeLong/McNemar testing (`artifacts/stats/stats_report.md`):
+
+- **Zero Specificity Degradation Under Ruler & Ink Artifacts**: `DermaFuzzy-XAI` (`risk_sqrt`) exhibits **0.0%** benign specificity drop under peripheral `ruler` markings (`82.5%`, `ΔSpec = +0.0%` vs `p_cnn` `-1.8%` to `80.7%`) and **0.0%** benign specificity drop under `ink` markings (`82.5%`, `ΔSpec = +0.0%`).
+- **Transparent Limitation Under Gel Halos**: Under translucent `gel` bubble overlays adjacent to the lesion rim, `risk_sqrt` shows a mild **-3.6%** benign specificity drop (`78.9%` vs `82.5%`), comparable to raw `p_cnn` (`-2.7%` to `79.8%`), identifying translucent rim artifacts as a clear avenue for future wet-contact artifact modeling.
+- **Off-Lesion Masking Collapse (`p_masked`)**: Neutralizing all off-lesion pixels before CNN inference collapses clean ROC-AUC from `0.8908` down to **0.6849** `[0.6327, 0.7359]` (Sensitivity `54.3%`), demonstrating that standard CNNs rely on perilesional skin contrast and motivating soft Grad-CAM attention gating (`g(α)`) over hard lesion cropping.
+- **Concave Sqrt vs. Smooth Hermite Trust Gate**: Concave square-root gating (`risk_sqrt`, `clean` AUC `0.8617`) outperforms Smooth Hermite S-Curve gating (`risk_hermite`, `clean` AUC `0.8447`) by **+0.0170** ROC-AUC (paired DeLong `z = 3.180`, `p = 0.0015`).
+- **Perilesional Radial Gradient `B_grad` Contribution**: Including `B_grad` adds **+2.2%** benign specificity on `clean` (`82.5%` for `risk_sqrt` vs `80.3%` for `risk_no_bgrad`, `[+0.4%, +4.5%]`) without sacrificing ROC-AUC (`0.8617` vs `0.8620`).
+
+![ROC & Precision-Recall Curves Across Clinical Tiers](artifacts/q1_figs/fig_roc_pr.png)
+
+![Threshold Operating Curve & Clinical Triage Trade-Off](artifacts/q1_figs/fig_threshold_triage.png)
+
+*(Additional publication figures rendered at 300 DPI: [Saliency Gates & Calibrated Membership Sets](artifacts/q1_figs/fig_gate_and_memberships.png) and [Artifact Resilience Across Conditions](artifacts/q1_figs/fig_artifact_resilience.png).)*
 
 ---
 
@@ -159,7 +197,7 @@ pip install pytest
 
 ### Run Full Test Suite
 ```bash
-# Execute all 210 unit and metamorphic tests
+# Execute all 290 unit and metamorphic tests (285 unit + 5 metamorphic MR1–MR5)
 pytest -v tests/
 ```
 
@@ -207,24 +245,55 @@ All core mathematical, segmentation, fuzzy inference, evaluation, and visualizat
 
 ---
 
-## Standalone Colab HAM10000 Training & Evaluation Pipeline
+## Standalone Colab HAM10000 Training, Q1 Experiments & Visualization CLIs
 
-The training and evaluation pipeline is implemented in `services/colab_trainer/train_ham10000.py`:
+All heavy ML training, perturbation experiments, cross-validation, biostatistics, and publication figure generation live cleanly inside `services/colab_trainer/` (keeping `packages/dermafuzzy_core/` free of TensorFlow/PyTorch imports):
 
 ```bash
-# Execute fast local dry-run on synthetic phantoms (< 5 seconds, zero GPU needed)
-python services/colab_trainer/train_ham10000.py --dry-run-synthetic
-
-# Execute full transfer learning on balanced HAM10000 (Melanoma vs Nevi) on Google Colab GPU
+# 1. Single-split HAM10000 training & 3-tier ablation (supports fast offline --dry-run-synthetic)
 python services/colab_trainer/train_ham10000.py \
   --data-dir data/HAM10000_images \
   --metadata-csv data/HAM10000_metadata.csv \
   --output-dir artifacts \
-  --epochs 10 \
+  --epochs 15 \
   --batch-size 32
+
+# 2. Mask-aware peripheral artifact perturbation study (clean / ruler / ink / gel; supports --selftest)
+python services/colab_trainer/artifact_perturbation_study.py \
+  --data-dir data/HAM10000_images \
+  --metadata-csv data/HAM10000_metadata.csv \
+  --model-path artifacts/mobilenetv2_ham10000.keras \
+  --calibration artifacts/fis_calibration.json \
+  --out-dir artifacts/artifact_study \
+  --batch-size 32
+
+# 3. Pure NumPy/SciPy biostatistics (DeLong, exact McNemar, stratified bootstrap CIs, Bayes PPV/NPV)
+python services/colab_trainer/stats_analysis.py \
+  --cases-csv artifacts/artifact_study/artifact_study_cases.csv \
+  --out-dir artifacts/stats \
+  --n-boot 2000 \
+  --seed 42 \
+  --threshold 0.50
+
+# 4. Leak-free 5-fold lesion-grouped cross-validation (supports --resume and offline --selftest)
+python services/colab_trainer/run_5fold_cv.py \
+  --data-dir data/HAM10000_images \
+  --metadata-csv data/HAM10000_metadata.csv \
+  --output-dir artifacts/cv_5fold \
+  --epochs 20 \
+  --batch-size 32 \
+  --resume
+
+# 5. Headless 300 DPI Q1 publication figures generator (supports offline --selftest)
+python services/colab_trainer/plot_q1_figures.py \
+  --cases artifacts/artifact_study/artifact_study_cases.csv \
+  --stats artifacts/stats/stats_summary.json \
+  --calibration artifacts/fis_calibration.json \
+  --cv-summary artifacts/cv_5fold/cv_summary.json \
+  --out-dir artifacts/q1_figs
 ```
 
-### CLI Arguments Reference
+### `train_ham10000.py` CLI Arguments Reference
 
 | CLI Flag | Type | Default | Description |
 |---|:---:|:---:|---|
@@ -252,4 +321,4 @@ DermaFuzzy-XAI adheres strictly to four core engineering principles:
    - Calibrations and metrics are serialized strictly as human-readable JSON, Markdown, and CSV. Zero `.pkl` or `.pickle` files exist in this repository.
 4. **Principle IV: Config-Driven & Test-First**:
    - Zero hardcoded magic numbers; all hyperparameters governed by `derma_config.yaml`.
-   - Comprehensive test suite covering 210 unit and metamorphic tests with 100% pass rate.
+   - Comprehensive test suite covering 290 unit and metamorphic tests (285 unit + 5 metamorphic) with 100% pass rate.
